@@ -1,6 +1,23 @@
 # FWC Window Counter
 
-exe(FWC 프레임 윈도우 카운터)에서 계산한 결과를 게임 안에 실시간으로 보여줍니다.
+Counts the **frame window** of every input in a level by replaying your macro with the real game physics, and shows it in game.
 
-1. exe에서 레벨·매크로를 고르고 [계산] → [지오드로 보내기]
-2. 게임에서 그 레벨을 열면 왼쪽 위에 칸별 개수, 왼쪽 아래에 진행률과 σ/s가 나옵니다.
+## In game
+- Top left: how many inputs fall in each window bin (17+, 13+, 9+, 7-8, 5-6, 4, 3, 2, 1).
+- Bottom left: progress and raw precision (24h, sigma/s).
+- A colored ring and the window number are left where each input happened.
+
+## How to use
+1. Put your macro in the mod config folder:
+   - an Eclipse replay renamed to `macro.gdr2` (240 TPS), or
+   - record one with this mod (**Record macro**).
+2. Turn on **Play macro**.
+3. Open the level, pause and press **FWC Count** (or turn on **Count windows in game**).
+4. Optional: **Count at 8000 fps (CBF)** measures inside ticks (1/8000 s steps).
+5. Optional: **Record video** saves `showcase.mp4` (needs `ffmpeg_path.txt` in the config folder).
+
+## Notes
+- Made for Geometry Dash 2.2081 with Geode.
+- Windows wider than 20 frames are not shown.
+- Do not play an Eclipse replay and this mod's macro at the same time.
+- Between-tick inputs follow the idea of the Click Between Frames mod (syzzi, MIT license); the code here is written separately.

@@ -13,6 +13,7 @@
 #include <Geode/modify/CCScheduler.hpp>
 #include <Geode/modify/PlayerObject.hpp>
 #include <Geode/utils/file.hpp>
+#include <tulip/TulipHook.hpp>
 #include <Windows.h>
 #include <algorithm>
 #include <cctype>
@@ -297,19 +298,24 @@ static void macroImportGdr2(std::filesystem::path const& dir) {
     }
     note(fmt::format("OK: {} inputs from macro.gdr2 (level '{}', skipped: {} player-2 inputs, {} left/right inputs)", ev.size(), info.levelName, info.p2Inputs, info.otherButtons));
 }
-static void macroLoad() {
-    g_mac = Macro{};
-    auto dir = Mod::get()->getConfigDir();
-    if (!Mod::get()->getSettingValue<bool>("macro-play")) return;          // 설정: 모드가 매크로 재생
-    macroImportGdr2(dir);                                                  // 설정 폴더에 macro.gdr2 (이클립스 매크로)가 새로 들어왔으면 macro.txt 로 바꿔 둔다
-    std::ifstream f(dir / "macro.txt");
+// 매크로 파일 읽기: 줄마다 "틱 누름 [틱 안 위치]". 위치가 없거나 범위 밖이면 0 (틱 시작). 읽은 입력 수를 돌려줌
+static int macroRead(std::filesystem::path const& path, Inputs& out) {
+    std::ifstream f(path);
     std::string line; int n = 0;
     while (std::getline(f, line)) {
         std::istringstream ls(line); int t, d; double fr = 0.0;
         if (!(ls >> t >> d)) continue;
         if (!(ls >> fr) || fr < 0.0 || fr >= 1.0) fr = 0.0;
-        inputsAdd(g_mac.inputs, t + fr, d != 0); ++n;
+        inputsAdd(out, t + fr, d != 0); ++n;
     }
+    return n;
+}
+static void macroLoad() {
+    g_mac = Macro{};
+    auto dir = Mod::get()->getConfigDir();
+    if (!Mod::get()->getSettingValue<bool>("macro-play")) return;          // 설정: 모드가 매크로 재생
+    macroImportGdr2(dir);                                                  // 설정 폴더에 macro.gdr2 (이클립스 매크로)가 새로 들어왔으면 macro.txt 로 바꿔 둔다
+    int n = macroRead(dir / "macro.txt", g_mac.inputs);
     g_mac.on = n > 0;
 }
 
@@ -353,6 +359,8 @@ struct SubIn { float frac; bool down; };
 static std::vector<SubIn> g_sub;                 // 이번 틱 안에서 넣을 입력 (위치 순)
 static bool g_subMid = false, g_subP2Done = false, g_subRot1 = false, g_subRot2 = false;
 static float g_subRot = 0.f;
+static bool g_subStep = false;                   // 이번 틱을 나눠 돌렸나 (비행기 회전 보정용)
+static float g_shipRotDelta = 0.f;               // 0 이 아니면 회전 보간을 이 시간에 비례하게 바꿈
 static CCPoint g_subP1Pos, g_subP2Pos;
 static Inputs g_live;                            // FWC 방식 녹화: 받은 실제 입력을 넣을 틱
 static float g_stepX0 = 0.f, g_stepDx = 0.f;     // CBF 모드 켠 채 녹화: 틱 시작 x, 직전 틱 이동량
@@ -850,7 +858,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
     void cntMerge() {
         auto dir = Mod::get()->getConfigDir();
         Inputs partB; double X = 0; int nB = 0;
-        { std::ifstream f(dir / "macro_part2.txt"); int t, d; while (f >> t >> d) { partB[t].push_back(In(d != 0)); ++nB; } }
+        nB = macroRead(dir / "macro_part2.txt", partB);                     // 틱 안 위치(세 번째 칸)도 그대로
         { std::ifstream f(dir / "merge_x.txt"); f >> X; }
         if (nB == 0 || X <= 0) return;
         g_cnt.goalX = X;
@@ -872,7 +880,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
             Inputs m; bool held = false;
             for (auto const& kv : partA) { if (kv.first >= J) break; m[kv.first] = kv.second; for (bool dn : kv.second) held = dn; }
             if (held) m[J].push_back(false);         // 이음매에서 누르고 있었으면 뗌
-            for (auto const& kv : partB) { auto& v = m[J + kv.first]; v.insert(v.end(), kv.second.begin(), kv.second.end()); }
+            for (auto const& kv : partB) for (In const& x : kv.second) inputsAdd(m, J + kv.first + (double)x.frac, x.down);   // 위치 유지, 같은 틱 안에서는 위치 순
             return m;
         };
         static const int joff[5] = {0, 1, -1, 2, -2};
@@ -1308,6 +1316,7 @@ class $modify(FwcPlayer, PlayerObject) {
         auto pl = PlayLayer::get();
         if (!pl || g_subMid) { PlayerObject::update(dt); return; }
         if (this == pl->m_player2 && g_subP2Done) { g_subP2Done = false; return; }          // 1번 update 안에서 이미 나눠 돌림
+        if (this == pl->m_player1) g_subStep = false;                                       // 새 틱
         if (this != pl->m_player1 || g_sub.empty()) { PlayerObject::update(dt); return; }
         auto p2 = pl->m_player2;
         bool dual = pl->m_gameState.m_isDualMode && p2;
@@ -1318,6 +1327,7 @@ class $modify(FwcPlayer, PlayerObject) {
             PlayerObject::update(dt);
             return;
         }
+        g_subStep = true;
         g_subP1Pos = this->getPosition(); if (dual) g_subP2Pos = p2->getPosition();
         bool g1 = this->m_isOnGround, g2 = dual ? p2->m_isOnGround : false;
         const float tiny = std::numeric_limits<float>::min();
@@ -1348,6 +1358,19 @@ class $modify(FwcPlayer, PlayerObject) {
         g_subMid = false;
         g_subRot = rest; g_subRot1 = split1; g_subRot2 = split2;
     }
+#ifndef FWC_GD2209
+    // 비행기·스윙 회전: 게임의 회전 보간(Slerp2D)은 시간에 비례하지 않아서, 틱을 조각내면 조각마다 너무 많이 돈다.
+    //   나눈 틱에서는 아주 작은 시간(1/1024)으로 불러 "단위 회전량"을 얻고, 그걸 실제 조각 시간에 비례하게 늘림 (CBF 와 같은 원리)
+    void updateShipRotation(float t) {
+        auto pl = PlayLayer::get();
+        if (pl && g_subStep && (this == pl->m_player1 || this == pl->m_player2)) {
+            g_shipRotDelta = t;
+            PlayerObject::updateShipRotation(1.f / 1024.f);
+            g_shipRotDelta = 0.f;
+        }
+        else PlayerObject::updateShipRotation(t);
+    }
+#endif
     // 게임이 틱 끝에 부르는 회전: 나눠 돌린 경우 남은 조각만큼만 돌리고, 직전 위치를 틱 시작 위치로 (움직이는 트리거·거미가 헷갈리지 않게)
     void updateRotation(float t) {
         auto pl = PlayLayer::get();
@@ -1356,6 +1379,19 @@ class $modify(FwcPlayer, PlayerObject) {
         PlayerObject::updateRotation(t);
     }
 };
+
+#ifndef FWC_GD2209
+static constexpr uintptr_t SLERP2D_2081 = 0x71ef0;          // 2.2081 윈도우의 Slerp2D(float, float, float) 위치
+static float fwcSlerp2D(float a, float b, float f) {
+    auto orig = reinterpret_cast<float (*)(float, float, float)>(geode::base::get() + SLERP2D_2081);
+    if (g_shipRotDelta != 0.f) return orig(a, b, g_shipRotDelta * f * 1024.f);     // f 는 (1/1024 × 상수) → 상수 × 실제 시간
+    return orig(a, b, f);
+}
+$on_mod(Loaded) {
+    auto r = Mod::get()->hook(reinterpret_cast<void*>(geode::base::get() + SLERP2D_2081), &fwcSlerp2D, "Slerp2D", tulip::hook::TulipConvention::Default);
+    if (!r) log::warn("Slerp2D 가로채기 실패: {}", r.unwrapErr());
+}
+#endif
 
 // 세는 중에는 음악 위치 옮기기·다시 틀기를 건너뜀 (되돌리기 한 번마다 걸리는 시간을 줄임)
 class $modify(FwcAudio, FMODAudioEngine) {
