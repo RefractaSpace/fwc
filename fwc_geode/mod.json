@@ -44,18 +44,6 @@
             "default": false,
             "name": "Record video",
             "description": "Needs 'Play macro'. Replays the macro from the start and records showcase.mp4 (1280x720, 60 fps, no sound) into the mod config folder. Needs ffmpeg_path.txt there."
-        },
-        "probe-test": {
-            "type": "bool",
-            "default": false,
-            "name": "Test: speed and rewind check",
-            "description": "Developer test. Runs once at 5 seconds while the macro plays and writes probe.txt."
-        },
-        "trace": {
-            "type": "bool",
-            "default": false,
-            "name": "Record positions",
-            "description": "Developer option. Saves the real player position every tick to trace.csv."
         }
     },
     "resources": {

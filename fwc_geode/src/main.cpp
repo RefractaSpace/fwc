@@ -65,6 +65,8 @@ static std::array<int, NBIN> g_count{};
 static std::vector<bool> g_used;     // 계산 누름 중 이미 센 것
 static int g_lastIdx = -1;           // 마지막으로 센 누름 번호 (σ/s 표시용)
 static std::vector<Ref<CCNode>> g_rings;   // 누른 자리 고리 (레벨 화면에 붙어 같이 움직임)
+static bool g_showRings = true;            // 설정 "show-rings" (레벨 시작 때 한 번 읽음)
+static size_t g_ringCull = 0;              // 화면 밖 고리 숨기기를 이어서 할 위치
 
 static std::filesystem::path levelsDir() {
     return Mod::get()->getConfigDir() / "levels";
@@ -128,6 +130,7 @@ static CCNode* makeRing(int window, CCPoint pos) {
 static void clearRings() {
     for (auto& r : g_rings) if (r) r->removeFromParent();
     g_rings.clear();
+    g_ringCull = 0;
 }
 
 static void resetCounts() {
@@ -194,43 +197,44 @@ public:
         return true;
     }
 
+    // 글자는 값이 바뀔 때만 다시 만든다 (CCLabelBMFont::setString 은 글자 스프라이트를 새로 만들어서, 매 프레임 부르면 렉의 원인)
+    std::array<int, NBIN> m_lastCount{};
+    int m_lastPct = -1, m_lastSig = -1;           // 0.01 단위 정수로 비교 (화면에 보이는 자릿수와 같음)
+    bool m_first = true;
     void refresh(float playerX) {
-        for (int i = 0; i < NBIN; ++i) m_nums[i]->setString(std::to_string(g_count[i]).c_str());
+        for (int i = 0; i < NBIN; ++i) {
+            if (!m_first && g_count[i] == m_lastCount[i]) continue;
+            m_lastCount[i] = g_count[i];
+            m_nums[i]->setString(std::to_string(g_count[i]).c_str());
+        }
         if (g_data && g_data->levelEnd > 0) {
             double p = std::clamp(playerX / g_data->levelEnd * 100.0, 0.0, 100.0);
-            m_pct->setString(fmt::format("{:.2f}%", p).c_str());
+            int pi = (int)std::lround(p * 100.0);
+            if (m_first || pi != m_lastPct) { m_lastPct = pi; m_pct->setString(fmt::format("{:.2f}%", p).c_str()); }
         }
         double s = 0.0;
         if (g_data && g_lastIdx >= 0 && g_lastIdx < (int)g_data->sigmaRun.size()) s = g_data->sigmaRun[g_lastIdx];
-        m_sig->setString(fmt::format("{:.2f}", s).c_str());
+        int si = (int)std::lround(s * 100.0);
+        if (m_first || si != m_lastSig) { m_lastSig = si; m_sig->setString(fmt::format("{:.2f}", s).c_str()); }
+        m_first = false;
     }
 };
 
 // 2.2081 실측: m_currentProgress 는 물리 1틱(1/240초)에 2씩 오른다 (첫 틱에 2). 매크로·계산 결과의 틱 번호 = progress / 2
 static inline int fwcTick(unsigned progress) { return (int)(progress / 2); }
 
-// ── 매크로 재생 + 시험 모드(probe). 모드 설정 "매크로 재생"을 켜면 설정 폴더 macro.txt 를 재생, "시험"까지 켜면 속도·되돌리기 측정 ──
-//   macro.txt: 줄마다 "틱 1" (누름) 또는 "틱 0" (뗌). 결과는 같은 폴더 probe.txt
-struct Probe {
-    bool on = false, ran = false, test = false;
+// ── 매크로 재생. 모드 설정 "매크로 재생"을 켜면 설정 폴더 macro.txt 를 재생 ──
+//   macro.txt: 줄마다 "틱 1" (누름) 또는 "틱 0" (뗌). 이클립스 macro.gdr2 를 넣으면 자동으로 macro.txt 로 바뀜
+struct Macro {
+    bool on = false;
     std::map<int, std::vector<bool>> inputs;
-    int cmdLog = 0, lastTick = -1;
-    int forceHold = 0;                 // 되돌린 직후 몇 틱 동안 "누르는 중"을 매크로대로 강제
-    int stage = 0;                     // 진행한 시험 수
-    std::vector<int> targets;          // 시험할 틱들
-    std::vector<int> kinds;            // 0 = 버튼 뗀 틱(그대로 되돌리기), 1 = 누르는 틱(누름 강제)
-    std::string out;
+    int lastTick = -1;
     bool heldAt(int t) const { bool h = false; for (auto const& kv : inputs) { if (kv.first > t) break; for (bool dn : kv.second) h = dn; } return h; }
 };
-static Probe g_probe;
-static void probeSave() {
-    if (!g_probe.on || g_probe.out.empty()) return;
-    std::ofstream f(Mod::get()->getConfigDir() / "probe.txt", std::ios::binary | std::ios::trunc);
-    f << g_probe.out;
-}
+static Macro g_mac;
 // 이클립스 매크로 바로 읽기: 설정 폴더의 macro.gdr2 가 macro.txt 보다 새것(또는 macro.txt 없음)이면 macro.txt 로 변환한다.
 //   기존 macro.txt 는 macro_prev.txt 로 복사해 둔다. 결과는 macro_import.txt 에 적는다.
-static void probeImportGdr2(std::filesystem::path const& dir) {
+static void macroImportGdr2(std::filesystem::path const& dir) {
     std::error_code ec;
     auto src = dir / "macro.gdr2", dst = dir / "macro.txt";
     if (!std::filesystem::exists(src, ec)) return;
@@ -253,28 +257,15 @@ static void probeImportGdr2(std::filesystem::path const& dir) {
     }
     note(fmt::format("OK: {} inputs from macro.gdr2 (level '{}', skipped: {} player-2 inputs, {} left/right inputs)", ev.size(), info.levelName, info.p2Inputs, info.otherButtons));
 }
-static void probeLoad() {
-    g_probe = Probe{};
+static void macroLoad() {
+    g_mac = Macro{};
     auto dir = Mod::get()->getConfigDir();
     if (!Mod::get()->getSettingValue<bool>("macro-play")) return;          // 설정: 모드가 매크로 재생
-    g_probe.test = Mod::get()->getSettingValue<bool>("probe-test");        // 설정: 시험(속도·되돌리기 측정)
-    probeImportGdr2(dir);                                                  // 설정 폴더에 macro.gdr2 (이클립스 매크로)가 새로 들어왔으면 macro.txt 로 바꿔 둔다
+    macroImportGdr2(dir);                                                  // 설정 폴더에 macro.gdr2 (이클립스 매크로)가 새로 들어왔으면 macro.txt 로 바꿔 둔다
     std::ifstream f(dir / "macro.txt");
     int t, d; int n = 0;
-    while (f >> t >> d) { g_probe.inputs[t].push_back(d != 0); ++n; }
-    g_probe.on = n > 0;
-    g_probe.out = fmt::format("probe 시작: 입력 {}개\n", n);
-    // 시험할 틱: (기준 틱 이후) 앞뒤 4틱 동안 버튼 상태가 안 바뀌는 첫 틱
-    auto pick = [&](int from, bool wantHeld) {
-        for (int t = from; t < from + 3000; ++t) {
-            bool ok = true;
-            for (int k = -4; k <= 4 && ok; ++k) ok = g_probe.heldAt(t + k) == wantHeld;
-            if (ok) return t;
-        }
-        return -1;
-    };
-    int plan[5][2] = {{1150, 0}, {1700, 1}, {2300, 0}, {2900, 1}, {3500, 0}};
-    for (auto& p : plan) { int t = pick(p[0], p[1] != 0); if (t > 0) { g_probe.targets.push_back(t); g_probe.kinds.push_back(p[1]); g_probe.out += fmt::format("시험 예정: 틱 {} ({})\n", t, p[1] ? "누르는 중" : "뗀 상태"); } }
+    while (f >> t >> d) { g_mac.inputs[t].push_back(d != 0); ++n; }
+    g_mac.on = n > 0;
 }
 
 // ── 게임 안에서 윈도우 세기 ──
@@ -301,12 +292,10 @@ struct Counter {
     int offset = 0;                            // 찾은 틱 맞춤 (매크로 틱 + offset = 게임 틱)
     double goalX = 0;                          // 0 이 아니면: 캐릭터 x 가 여기에 닿으면 "끝까지 감"으로 침 (매크로 합치기에서 앞부분만 볼 때)
     std::string merge;                         // 합치기 기록
-    int stepExtra = 0;                         // 화면 없이 돌릴 때 틱마다 추가로 하는 일 (0 없음, 1 보이는 범위 갱신, 2 화면 그리기 함수)
     bool calibOk = false;                      // 그대로 재생해서 끝까지 갔나
     std::string repair;                        // 자동 고침 기록
     struct P3 { float x, y; double v; float rot; };
     std::vector<P3> fullRef;                   // 화면 없이 돌린 전체 경로 (틱 번호로 찾음). 실제 재생과 비교용
-    std::string diffLog; int diffCount = 0; bool diffSaved = false;
     long long chkTicks = 0, chkPosDiff = 0, chkRotDiff = 0;   // 되돌린 뒤 다시 돌린 경로 vs 처음부터 돌린 경로: 비교한 틱 / 위치 다른 틱 / 회전만 다른 틱
     int repairs = 0;
     CCLabelBMFont* label = nullptr;
@@ -383,20 +372,11 @@ static void clickLoad() {
     };
     g_clickPress = pick("press.wav", "fwc_press.wav");
     g_clickRelease = pick("release.wav", "fwc_release.wav");
+    auto fm = FMODAudioEngine::sharedEngine();          // 첫 클릭에 파일을 읽느라 끊기지 않게 미리 불러 둠
+    fm->preloadEffect(g_clickPress);
+    fm->preloadEffect(g_clickRelease);
 }
 
-// ── 진단용 위치 기록 (엔진 검증용). 모드 설정 "위치 기록"을 켰을 때만 → 설정 폴더 trace.csv 로 저장 ──
-static bool g_traceOn = false;
-static std::string g_trace;
-static int g_traceAttempt = 0;
-static void traceFlush() {
-    if (!g_traceOn || g_trace.empty()) return;
-    // 시도마다 이어 씀 (레벨을 새로 열면 파일을 새로 시작). 머리줄에 모드 재생 여부를 적음
-    std::ofstream f(Mod::get()->getConfigDir() / "trace.csv", std::ios::binary | (g_traceAttempt == 0 ? std::ios::trunc : std::ios::app));
-    f << "# attempt " << ++g_traceAttempt << " modplay=" << (g_probe.on ? 1 : 0) << "\n";
-    f << "progress,leveltime240,x,y,yvel,ship,ufo,ball,wave,robot,spider,swing,upside,mini,hold\n" << g_trace;
-    g_trace.clear();
-}
 
 static bool fwcBlockPause() {
     if (g_autorun) return true;
@@ -413,16 +393,16 @@ class $modify(FwcPlayLayer, PlayLayer) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
         g_data = loadFor(std::string(level->m_levelName));
         if (!Mod::get()->getSettingValue<bool>("enabled")) g_data.reset();      // 설정에서 끄면 표시·집계 안 함
-        g_traceOn = Mod::get()->getSettingValue<bool>("trace"); g_trace.clear(); g_traceAttempt = 0;
-        probeLoad();
+        macroLoad();
         clickLoad();
+        g_showRings = Mod::get()->getSettingValue<bool>("show-rings");
         g_rec = Recorder{};
-        g_rec.want = g_probe.on && Mod::get()->getSettingValue<bool>("record-video");
+        g_rec.want = g_mac.on && Mod::get()->getSettingValue<bool>("record-video");
         g_cnt = Counter{};
-        g_cnt.on = g_probe.on && Mod::get()->getSettingValue<bool>("count-windows");      // 설정이 켜져 있으면 레벨을 열자마자 셈
+        g_cnt.on = g_mac.on && Mod::get()->getSettingValue<bool>("count-windows");      // 설정이 켜져 있으면 레벨을 열자마자 셈
         g_cnt.levelName = std::string(level->m_levelName);
-        if (g_probe.on) {                                 // 입력 목록 만들기 (나중에 메뉴에서 시작할 수도 있으므로 항상)
-            for (auto const& kv : g_probe.inputs) for (bool dn : kv.second) g_cnt.ev.push_back({kv.first, dn});
+        if (g_mac.on) {                                 // 입력 목록 만들기 (나중에 메뉴에서 시작할 수도 있으므로 항상)
+            for (auto const& kv : g_mac.inputs) for (bool dn : kv.second) g_cnt.ev.push_back({kv.first, dn});
             for (int i = 0; i < (int)g_cnt.ev.size(); ++i) if (g_cnt.ev[i].second) g_cnt.pressIdx.push_back(i);
             if (g_cnt.pressIdx.empty()) { g_cnt.on = false; g_cnt.ev.clear(); }
         }
@@ -453,8 +433,6 @@ class $modify(FwcPlayLayer, PlayLayer) {
         // 실제 게임은 프레임마다 화면 애니메이션(큐브 회전 등)을 먼저 진행한다. 이걸 빼면 기울어진 가시와의 충돌 판정이 실제와 달라진다 (시험으로 확인: 넣으면 실제와 같은 틱에서 죽음)
         static_cast<CCObject*>(CCDirector::get()->getActionManager())->update(1.f / 240.f);
         GJBaseGameLayer::update(1.f / 240.f);
-        if (g_cnt.stepExtra == 1) this->updateVisibility(1.f / 240.f);
-        else if (g_cnt.stepExtra == 2) this->visit();
         g_cnt.internal = false;
         ++g_cnt.ticksRun;
         g_cnt.msStep += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
@@ -473,7 +451,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         this->resetLevel();
         g_cnt.msReset += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
         g_cnt.dead = false; g_cnt.completed = false;
-        g_probe.lastTick = cntTick();      // 이 틱까지의 입력은 저장 지점에 이미 반영돼 있음
+        g_mac.lastTick = cntTick();      // 이 틱까지의 입력은 저장 지점에 이미 반영돼 있음
         ++g_cnt.resets;
     }
     void cntMakeCp() {
@@ -491,7 +469,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
     int cntRestoreTick(int T) {
         for (int t = T - Counter::MAXS - 2; t >= 6; --t) {
             bool ok = true;
-            for (int k = -2; k <= 2 && ok; ++k) ok = !g_probe.heldAt(t + k);
+            for (int k = -2; k <= 2 && ok; ++k) ok = !g_mac.heldAt(t + k);
             if (ok) return t;
         }
         return -1;
@@ -511,7 +489,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
     //   (이클립스가 시작 지점에 따라 틱 번호를 다르게 셀 수 있어서, 직접 돌려 보고 정함)
     void cntCalibrate() {
         static const int offs[5] = {0, -1, 1, -2, 2};
-        const auto base = g_probe.inputs;
+        const auto base = g_mac.inputs;
         if (base.empty()) return;
         int lastEv = base.rbegin()->first;
         auto shifted = [&](int off) {
@@ -521,24 +499,24 @@ class $modify(FwcPlayLayer, PlayLayer) {
         };
         int best = 0, bestTick = -1;
         for (int off : offs) {
-            g_probe.inputs = shifted(off);
+            g_mac.inputs = shifted(off);
             g_cnt.useTrial = false;
             m_isPracticeMode = false;
             this->resetLevel();
-            g_probe.lastTick = -1; g_cnt.dead = false; g_cnt.completed = false;
+            g_mac.lastTick = -1; g_cnt.dead = false; g_cnt.completed = false;
             int reached = cntRunUntil(lastEv + 240);
             g_cnt.calib += fmt::format("offset {}: {}; ", off, g_cnt.completed ? std::string("level complete") : (g_cnt.dead ? fmt::format("dies at tick {}", cntTick()) : fmt::format("alive at tick {}", cntTick())));
             if (reached > bestTick) { bestTick = reached; best = off; }
         }
         g_cnt.offset = best;
         g_cnt.calibOk = bestTick >= INT_MAX - 1;
-        g_probe.inputs = shifted(best);
+        g_mac.inputs = shifted(best);
         g_cnt.ev.clear(); g_cnt.pressIdx.clear();
-        for (auto const& kv : g_probe.inputs) for (bool dn : kv.second) g_cnt.ev.push_back({kv.first, dn});
+        for (auto const& kv : g_mac.inputs) for (bool dn : kv.second) g_cnt.ev.push_back({kv.first, dn});
         for (int i = 0; i < (int)g_cnt.ev.size(); ++i) if (g_cnt.ev[i].second) g_cnt.pressIdx.push_back(i);
         m_isPracticeMode = false;
         this->resetLevel();
-        g_probe.lastTick = -1; g_cnt.dead = false; g_cnt.completed = false;
+        g_mac.lastTick = -1; g_cnt.dead = false; g_cnt.completed = false;
         log::info("틱 맞춤 찾기: {} → {} 선택", g_cnt.calib, best);
     }
     // ───────── 영상 녹화 ─────────
@@ -571,8 +549,8 @@ class $modify(FwcPlayLayer, PlayLayer) {
         g_cnt.useTrial = false;
         m_isPracticeMode = false;
         this->resetLevel();
-        g_probe.lastTick = -1;
-        g_rec.endTick = (g_probe.inputs.empty() ? 0 : g_probe.inputs.rbegin()->first) + 360;
+        g_mac.lastTick = -1;
+        g_rec.endTick = (g_mac.inputs.empty() ? 0 : g_mac.inputs.rbegin()->first) + 360;
         g_rec.frames = 0; g_rec.active = true; g_rec.t0 = std::chrono::steady_clock::now();
         fwcActionsAuto(false);
         float songOffset = m_levelSettings ? m_levelSettings->m_songOffset : 0.f;
@@ -623,7 +601,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
     void cntFresh() {                      // 지금 시작 지점에서 새로 시작 (연습 모드 아님)
         m_isPracticeMode = false;
         this->resetLevel();
-        g_probe.lastTick = -1; g_cnt.dead = false; g_cnt.completed = false;
+        g_mac.lastTick = -1; g_cnt.dead = false; g_cnt.completed = false;
     }
     int cntRunUntil(int limit) {           // 죽으면 그 틱, 클리어면 INT_MAX, limit 까지 살면 INT_MAX-1
         for (int g = 0, cap = (limit - cntTick()) + 400; g < cap && cntTick() < limit; ++g) {
@@ -637,8 +615,8 @@ class $modify(FwcPlayLayer, PlayLayer) {
     // 자동 고침: 연습 모드에서 이어 찍은 매크로는 되살아난 지점에서 미세하게 어긋나 그대로는 재생되지 않는다.
     //   죽는 지점 직전의 입력 몇 개를 1~8틱씩 옮겨 보고, 가장 멀리 가는 것을 골라 적용하기를 끝까지 반복한다.
     bool cntRepair() {
-        if (g_probe.inputs.empty()) return false;
-        const int goal = g_probe.inputs.rbegin()->first + 240;
+        if (g_mac.inputs.empty()) return false;
+        const int goal = g_mac.inputs.rbegin()->first + 240;
         static const int shifts[] = {-1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -8, 8, -10, 10, -12, 12};
         for (int iter = 0; iter < 120; ++iter) {
             cntDropCp();
@@ -648,13 +626,13 @@ class $modify(FwcPlayLayer, PlayLayer) {
             if (D >= INT_MAX - 1) return true;                       // 끝까지 감
             // 상태를 바꾸는 입력만 순서대로
             std::vector<std::pair<int, bool>> ev; bool st = false;
-            for (auto const& kv : g_probe.inputs) for (bool dn : kv.second) if (dn != st) { ev.push_back({kv.first, dn}); st = dn; }
+            for (auto const& kv : g_mac.inputs) for (bool dn : kv.second) if (dn != st) { ev.push_back({kv.first, dn}); st = dn; }
             std::vector<int> cand;
             for (int i = (int)ev.size() - 1; i >= 0 && (int)cand.size() < 6; --i) if (ev[i].first < D && ev[i].first > D - 720 && ev[i].first >= 12) cand.push_back(i);
             if (cand.empty()) { g_cnt.repair += fmt::format("stuck at tick {} (no input to adjust); ", D); return false; }
             int earliest = ev[cand.back()].first;
             int R = -1;
-            for (int t = earliest - 12; t >= 6; --t) { bool ok = true; for (int k = -2; k <= 2 && ok; ++k) ok = !g_probe.heldAt(t + k); if (ok) { R = t; break; } }
+            for (int t = earliest - 12; t >= 6; --t) { bool ok = true; for (int k = -2; k <= 2 && ok; ++k) ok = !g_mac.heldAt(t + k); if (ok) { R = t; break; } }
             cntFresh();
             if (R > 0) { if (!cntStepTo(R)) { g_cnt.repair += fmt::format("stuck at tick {} (cannot reach {}); ", D, R); return false; } cntMakeCp(); }
             int bestReach = D, bestI = -1, bestD = 0;
@@ -662,7 +640,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
                 int T = ev[ci].first, nT = T + d;
                 int prevT = ci > 0 ? ev[ci - 1].first : 0, nextT = ci + 1 < (int)ev.size() ? ev[ci + 1].first : INT_MAX;
                 if (nT <= prevT || nT >= nextT || nT <= (R > 0 ? R + 1 : 6)) continue;
-                g_cnt.trial = g_probe.inputs;
+                g_cnt.trial = g_mac.inputs;
                 { auto& v = g_cnt.trial[T]; for (auto it = v.begin(); it != v.end(); ++it) if (*it == ev[ci].second) { v.erase(it); break; } if (v.empty()) g_cnt.trial.erase(T); g_cnt.trial[nT].push_back(ev[ci].second); }
                 if (R > 0) cntRestore(); else cntFresh();
                 g_cnt.useTrial = true; ++g_cnt.trials;
@@ -673,52 +651,24 @@ class $modify(FwcPlayLayer, PlayLayer) {
             if (bestI < 0 || bestReach <= D + 20) { g_cnt.repair += fmt::format("stuck at tick {} (no shift helps); ", D); return false; }
             {   // 적용
                 int T = ev[bestI].first, nT = T + bestD; bool dn = ev[bestI].second;
-                auto& v = g_probe.inputs[T]; for (auto it = v.begin(); it != v.end(); ++it) if (*it == dn) { v.erase(it); break; } if (v.empty()) g_probe.inputs.erase(T);
-                g_probe.inputs[nT].push_back(dn);
+                auto& v = g_mac.inputs[T]; for (auto it = v.begin(); it != v.end(); ++it) if (*it == dn) { v.erase(it); break; } if (v.empty()) g_mac.inputs.erase(T);
+                g_mac.inputs[nT].push_back(dn);
                 g_cnt.repair += fmt::format("{} {} {}->{} (died {}); ", dn ? "press" : "release", T, T, nT, D);
                 ++g_cnt.repairs;
             }
         }
         return false;
     }
-    // 물리 시험: 화면 없이 돌릴 때 실제 재생과 같은 곳에서 죽게 만드는 방법 찾기. 방법마다 죽는 틱을 physics_test.txt 에 적음
-    void cntPhysicsTest() {
-        std::string o;
-        auto save = [&]() { std::ofstream f(Mod::get()->getConfigDir() / "physics_test.txt", std::ios::binary | std::ios::trunc); f << o; };
-        int goal = g_probe.inputs.empty() ? 0 : g_probe.inputs.rbegin()->first + 240;
-        auto run = [&](const char* name, int extra, bool forceObb) {
-            g_cnt.useTrial = false;
-            cntFresh();
-            if (forceObb && m_objects) {
-                int n = 0;
-                for (auto obj : CCArrayExt<GameObject*>(m_objects)) { if (!obj) continue; obj->m_isOrientedBoxDirty = true; obj->updateOrientedBox(); ++n; }
-                o += fmt::format("  (objects refreshed: {})\n", n);
-            }
-            g_cnt.stepExtra = extra;
-            auto t0 = std::chrono::steady_clock::now();
-            int r = cntRunUntil(goal);
-            g_cnt.stepExtra = 0;
-            double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-            o += fmt::format("{}: {} ({:.0f} ms)\n", name, r == INT_MAX ? std::string("level complete") : (r == INT_MAX - 1 ? std::string("alive to the end") : fmt::format("dies at tick {}", r)), ms);
-            save();
-        };
-        o += "starting\n"; save();
-        run("0 plain", 0, false);
-        run("1 updateVisibility each tick", 1, false);
-        run("4 advance actions each tick", 4, false);
-        o += "finished\n"; save();
-        cntFresh();
-    }
     void cntRebuildEv() {
         g_cnt.ev.clear(); g_cnt.pressIdx.clear();
-        for (auto const& kv : g_probe.inputs) for (bool dn : kv.second) g_cnt.ev.push_back({kv.first, dn});
+        for (auto const& kv : g_mac.inputs) for (bool dn : kv.second) g_cnt.ev.push_back({kv.first, dn});
         for (int i = 0; i < (int)g_cnt.ev.size(); ++i) if (g_cnt.ev[i].second) g_cnt.pressIdx.push_back(i);
     }
     void cntSaveMacro(const char* backupName) {     // 지금 입력을 macro.txt 로 저장 (기존 파일은 backupName 으로 한 번만 보관)
         auto dir = Mod::get()->getConfigDir(); std::error_code ec;
         if (!std::filesystem::exists(dir / backupName, ec)) std::filesystem::copy_file(dir / "macro.txt", dir / backupName, ec);
         std::ofstream f(dir / "macro.txt", std::ios::binary | std::ios::trunc);
-        for (auto const& kv : g_probe.inputs) for (bool dn : kv.second) f << kv.first << " " << (dn ? 1 : 0) << "\n";
+        for (auto const& kv : g_mac.inputs) for (bool dn : kv.second) f << kv.first << " " << (dn ? 1 : 0) << "\n";
     }
     void cntRepairPass() {                           // 그대로는 끝까지 못 가면 자동 고침
         int before = g_cnt.repairs;
@@ -752,7 +702,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         g_cnt.goalX = 0;
         if (T0 < 0) { g_cnt.merge = fmt::format("merge failed: part 1 does not reach x {:.1f} (stops at tick {}); ", X, cntTick()); cntFresh(); return; }
         // 이음매 틱을 T0-2 ~ T0+2 로 바꿔 가며 붙여 보고, 가장 멀리 가는 것을 고름 (닿는 틱이 1틱쯤 어긋날 수 있어서)
-        const auto partA = g_probe.inputs;
+        const auto partA = g_mac.inputs;
         auto build = [&](int J) {
             std::map<int, std::vector<bool>> m; bool held = false;
             for (auto const& kv : partA) { if (kv.first >= J) break; m[kv.first] = kv.second; for (bool dn : kv.second) held = dn; }
@@ -763,23 +713,23 @@ class $modify(FwcPlayLayer, PlayLayer) {
         static const int joff[5] = {0, 1, -1, 2, -2};
         int bestJ = T0, bestReach = -1;
         for (int jo : joff) {
-            g_probe.inputs = build(T0 + jo);
+            g_mac.inputs = build(T0 + jo);
             g_cnt.useTrial = false;
             cntFresh();
-            int r = cntRunUntil(g_probe.inputs.rbegin()->first + 240);
+            int r = cntRunUntil(g_mac.inputs.rbegin()->first + 240);
             g_cnt.merge += fmt::format("join {}{}: {}; ", jo >= 0 ? "+" : "", jo, r >= INT_MAX - 1 ? std::string("reaches the end") : fmt::format("dies at tick {}", r));
             if (r > bestReach) { bestReach = r; bestJ = T0 + jo; }
         }
         std::map<int, std::vector<bool>> merged = build(bestJ);
         g_cnt.merge += fmt::format("merged at tick {} (part 1 reaches x {:.1f} at tick {}): part2 {} inputs shifted by {}; ", bestJ, X, T0, nB, bestJ);
-        g_probe.inputs = merged;
+        g_mac.inputs = merged;
         cntSaveMacro("macro_part1.txt");
         { std::ofstream f(dir / "macro_part2.txt", std::ios::binary | std::ios::trunc); f << ""; }   // 다시 합치지 않도록 비움 (원본은 앱 폴더에 있음)
         cntRebuildEv();
         g_cnt.calibOk = false;
         g_cnt.useTrial = false;
         cntFresh();
-        int r = cntRunUntil(g_probe.inputs.rbegin()->first + 240);
+        int r = cntRunUntil(g_mac.inputs.rbegin()->first + 240);
         g_cnt.merge += r >= INT_MAX - 1 ? "merged macro reaches the end as is; " : fmt::format("merged macro dies at tick {} -> repairing; ", r);
         if (r < INT_MAX - 1) cntRepairPass();
         g_cnt.calibOk = true;
@@ -796,15 +746,13 @@ class $modify(FwcPlayLayer, PlayLayer) {
         {   // 전체 경로 기록: 지금 입력 그대로 화면 없이 처음부터 끝까지
             g_cnt.useTrial = false;
             cntFresh();
-            int goal = g_probe.inputs.empty() ? 0 : g_probe.inputs.rbegin()->first + 240;
+            int goal = g_mac.inputs.empty() ? 0 : g_mac.inputs.rbegin()->first + 240;
             g_cnt.fullRef.assign(goal + 2, Counter::P3{0, 0, 0, 0});
-            int first = cntTick();
             for (int g = 0, cap = goal + 400; g < cap && cntTick() < goal && !g_cnt.dead && !g_cnt.completed; ++g) {
                 cntStep();
                 int t = cntTick();
                 if (t >= 0 && t < (int)g_cnt.fullRef.size()) g_cnt.fullRef[t] = {m_player1->getPositionX(), m_player1->getPositionY(), m_player1->m_yVelocity, m_player1->getRotation()};
             }
-            g_cnt.diffLog = fmt::format("fast run: start tick {}, end tick {}, dead {}, completed {}\n", first, cntTick(), (int)g_cnt.dead, (int)g_cnt.completed);
             cntFresh();
         }
         log::info("윈도우 세기 시작: 누름 {}개", g_cnt.pressIdx.size());
@@ -822,7 +770,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         int nextT = afterIdx < (int)ev.size() ? ev[afterIdx].first : INT_MAX;
         if (nT <= prevT || nT <= g_cnt.cpTick + 1) return false;          // 앞 입력을 넘어가면 안 됨
         if (pair ? nRel >= nextT : nT >= nextT) return false;             // 뒤 입력을 넘어가면 안 됨
-        g_cnt.trial = g_probe.inputs;                                    // 입력 복사 후 이 누름(과 뗌)만 옮김
+        g_cnt.trial = g_mac.inputs;                                    // 입력 복사 후 이 누름(과 뗌)만 옮김
         auto move = [&](int from, int to, bool dn) {
             auto& v = g_cnt.trial[from];
             for (auto it = v.begin(); it != v.end(); ++it) if (*it == dn) { v.erase(it); break; }
@@ -895,7 +843,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
             }
         }
         this->resetLevel();                 // 지금 시작 지점(스타트포스)에서 다시 시작 → 매크로 재생 + 숫자·고리 표시
-        g_probe.lastTick = -1;
+        g_mac.lastTick = -1;
     }
     // 프레임마다 누름 하나씩 처리
     void cntWork() {
@@ -973,92 +921,39 @@ class $modify(FwcPlayLayer, PlayLayer) {
     }
 
     void resetLevel() {
-        if (g_trace.size() > 20000) traceFlush();      // 방금 끝난 시도가 1초 이상이면 저장
-        g_trace.clear();
-        g_probe.lastTick = -1;
+        g_mac.lastTick = -1;
         PlayLayer::resetLevel();
         resetCounts();                       // 다시 시작하면 0부터 (연습 모드 체크포인트는 고려 안 함)
-        if (m_fields->m_hud) m_fields->m_hud->refresh(0.f);
-    }
-
-    // 시험 본체: 정해 둔 틱마다 ① 저장 지점 ② 화면 없이 1200틱 진행(A) ③ 되돌리기 ④ 다시 1200틱(B) → A와 B가 틱마다 같은지 비교
-    void probeRun(int kind) {
-        auto& o = g_probe.out;
-        const int N = 1200;
-        struct S { unsigned prog; float x, y; double v; int hold, dead; };
-        auto runN = [&](std::vector<S>& tr, double& ms) {
-            auto t0 = std::chrono::steady_clock::now();
-            for (int i = 0; i < N + 4; ++i) {
-                if (m_player1->m_isDead || m_hasCompletedLevel) break;
-                GJBaseGameLayer::update(1.f / 240.f);
-                tr.push_back({m_gameState.m_currentProgress, m_player1->getPositionX(), m_player1->getPositionY(), m_player1->m_yVelocity,
-                              (int)m_player1->m_holdingButtons[1], (int)m_player1->m_isDead});
-            }
-            ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-        };
-        unsigned p0 = m_gameState.m_currentProgress;
-        o += fmt::format("== 시험 {}: 틱 {} ({}) x={:.3f} y={:.3f} 비행기={} 뒤집힘={} 누름={}\n", g_probe.stage, fwcTick(p0), kind ? "누르는 중" : "뗀 상태",
-                         m_player1->getPositionX(), m_player1->getPositionY(), (int)m_player1->m_isShip, (int)m_player1->m_isUpsideDown, (int)m_player1->m_holdingButtons[1]);
-        CheckpointObject* cp = this->createCheckpoint();
-        if (!cp) { o += "저장 지점 만들기 실패\n"; probeSave(); return; }
-        cp->retain();
-        std::vector<S> a, b; double msA = 0, msB = 0;
-        runN(a, msA);
-        o += fmt::format("  A: update {}번, {:.1f} ms, 죽음={}\n", a.size(), msA, (int)m_player1->m_isDead);
-        std::map<unsigned, S> ma; for (auto& e : a) ma[e.prog] = e;
-        bool wasPractice = m_isPracticeMode;
-        m_isPracticeMode = true;
-        this->storeCheckpoint(cp);
-        this->resetLevel();
-        int tk = fwcTick(m_gameState.m_currentProgress);
-        g_probe.lastTick = tk;                       // 이 틱까지의 입력은 저장 지점에 이미 반영돼 있음
-        g_probe.forceHold = kind ? 6 : 0;
-        o += fmt::format("  되돌린 뒤: 틱 {} x={:.3f} y={:.3f} 누름={}\n", tk, m_player1->getPositionX(), m_player1->getPositionY(), (int)m_player1->m_holdingButtons[1]);
-        runN(b, msB);
-        g_probe.forceHold = 0;
-        int n = 0, nd = 0; unsigned firstDiff = 0; double maxd = 0;
-        for (auto& e : b) {
-            auto it = ma.find(e.prog); if (it == ma.end()) continue;
-            ++n;
-            double d = std::max({std::fabs((double)it->second.x - e.x), std::fabs((double)it->second.y - e.y), std::fabs(it->second.v - e.v)});
-            if (d > 0) { if (!nd) firstDiff = e.prog; ++nd; }
-            maxd = std::max(maxd, d);
-        }
-        o += fmt::format("  B: update {}번, {:.1f} ms, 죽음={} | 같은 틱 {}개 중 다른 틱 {}개, 처음 다른 틱 {}, 최대 차이 {:.6f}\n", b.size(), msB, (int)m_player1->m_isDead, n, nd, fwcTick(firstDiff), maxd);
-        if (nd) {
-            int shown = 0;
-            for (auto& e : b) {
-                auto it = ma.find(e.prog); if (it == ma.end()) continue;
-                if (e.prog + 4 < firstDiff) continue;
-                o += fmt::format("    틱 {} A y {:.4f} v {:.4f} 누름{} | B y {:.4f} v {:.4f} 누름{}\n", fwcTick(e.prog), it->second.y, it->second.v, it->second.hold, e.y, e.v, e.hold);
-                if (++shown >= 8) break;
-            }
-        }
-        m_isPracticeMode = wasPractice;
-        cp->release();
-        probeSave();
+        if (m_fields->m_hud) { m_fields->m_hud->m_first = true; m_fields->m_hud->refresh(0.f); }
     }
 
     void postUpdate(float dt) {
         PlayLayer::postUpdate(dt);
-        static bool s_inProbe = false;
-        if (g_probe.on && g_probe.test && !s_inProbe && !g_cnt.on && m_player1 && !m_player1->m_isDead && g_probe.stage < (int)g_probe.targets.size()) {
-            s_inProbe = true;
-            int target = g_probe.targets[g_probe.stage];
-            int now = fwcTick(m_gameState.m_currentProgress);
-            if (now > target) ++g_probe.stage;                       // 지나쳤으면 건너뜀
-            else if (now >= target - 12) {                           // 가까워지면 한 틱씩 직접 돌려 정확히 그 틱에 맞춤
-                for (int g = 0; g < 40 && fwcTick(m_gameState.m_currentProgress) < target && !m_player1->m_isDead; ++g) GJBaseGameLayer::update(1.f / 240.f);
-                if (fwcTick(m_gameState.m_currentProgress) == target && !m_player1->m_isDead) probeRun(g_probe.kinds[g_probe.stage]);
-                ++g_probe.stage;
-            }
-            s_inProbe = false;
-        }
         if (m_fields->m_hud && m_player1) m_fields->m_hud->refresh(m_player1->getPositionX());
+        ringsCull();
+    }
+    // 고리가 많아지면(수백 개) 화면 밖 것까지 매 프레임 그리는 게 렉의 원인 → 화면에 보이는 범위(+여유) 밖은 숨김.
+    //   한 프레임에 최대 64개씩 돌아가며 검사 (고리가 아무리 많아도 프레임당 일이 일정)
+    void ringsCull() {
+        if (g_rings.empty() || !m_objectLayer) return;
+        auto ws = CCDirector::get()->getWinSize();
+        CCPoint c[4] = {m_objectLayer->convertToNodeSpace({0.f, 0.f}), m_objectLayer->convertToNodeSpace({ws.width, 0.f}),
+                        m_objectLayer->convertToNodeSpace({0.f, ws.height}), m_objectLayer->convertToNodeSpace({ws.width, ws.height})};
+        float x0 = c[0].x, x1 = c[0].x, y0 = c[0].y, y1 = c[0].y;
+        for (auto const& q : c) { x0 = std::min(x0, q.x); x1 = std::max(x1, q.x); y0 = std::min(y0, q.y); y1 = std::max(y1, q.y); }
+        const float m = 60.f;                                // 고리 반지름 + 숫자 폭보다 넉넉하게
+        x0 -= m; x1 += m; y0 -= m; y1 += m;
+        size_t n = g_rings.size(), todo = std::min<size_t>(n, 64);
+        for (size_t k = 0; k < todo; ++k) {
+            if (g_ringCull >= n) g_ringCull = 0;
+            auto& r = g_rings[g_ringCull++];
+            if (!r) continue;
+            auto p = r->getPosition();
+            r->setVisible(p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1);
+        }
     }
 
     void onQuit() {
-        traceFlush(); probeSave();
         clearRings();
         g_data.reset();
         PlayLayer::onQuit();
@@ -1078,10 +973,10 @@ class $modify(FwcGameLayer, GJBaseGameLayer) {
         if (pl && static_cast<GJBaseGameLayer*>(pl) == this && g_cnt.armed && !g_cnt.busy && !g_cnt.internal && !g_cnt.ev.empty()) {
             // 메뉴에서 시작: 결과를 비우고 지금 시작 지점에서 다시 시작한 뒤 셈
             g_cnt.armed = false; g_cnt.on = true; g_cnt.done = false; g_cnt.failed = false; g_cnt.msg.clear();
-            g_cnt.diffSaved = false; g_cnt.diffCount = 0; g_cnt.calib.clear(); g_cnt.repair.clear(); g_cnt.repairs = 0;
+            g_cnt.calib.clear(); g_cnt.repair.clear(); g_cnt.repairs = 0;
             g_cnt.res.clear(); g_cnt.cur = 0; g_cnt.trials = 0; g_cnt.resets = 0; g_cnt.ticksRun = 0; g_cnt.msReset = 0; g_cnt.msStep = 0;
             static_cast<FwcPlayLayer*>(pl)->resetLevel();
-            g_probe.lastTick = -1;
+            g_mac.lastTick = -1;
             return;
         }
         if (pl && static_cast<GJBaseGameLayer*>(pl) == this && g_cnt.on && !g_cnt.internal && m_player1) {
@@ -1089,68 +984,21 @@ class $modify(FwcGameLayer, GJBaseGameLayer) {
             if (!g_cnt.done && !m_player1->m_isDead && fwcTick(m_gameState.m_currentProgress) >= 8) { static_cast<FwcPlayLayer*>(pl)->cntStart(); return; }
         }
         GJBaseGameLayer::update(dt);
-        // 노래 위치 기록: 실제 재생에서 0.5초마다 "게임 틱 ↔ 노래 재생 위치"를 music_info.txt 에 남김 (영상에 노래를 맞춰 입히기 위한 측정)
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && g_autorun && !g_cnt.busy && !g_rec.active && !g_cnt.internal && m_player1) {
-            static int s_lastSlot = -1; static std::string s_music;
-            int t = fwcTick(m_gameState.m_currentProgress);
-            if (t < 60) s_lastSlot = -1;
-            if (t >= 120 && t <= 2400 && t / 120 != s_lastSlot) {
-                s_lastSlot = t / 120;
-                auto fm = FMODAudioEngine::sharedEngine();
-                s_music += fmt::format("tick {} leveltime {:.4f} music_ms {} length_ms {} offset_field {} playing {}\n", t, m_gameState.m_levelTime,
-                                       fm->getMusicTimeMS(0), fm->getMusicLengthMS(0), fm->m_musicOffset, (int)fm->isMusicPlaying(0));
-                std::ofstream f(Mod::get()->getConfigDir() / "music_info.txt", std::ios::binary | std::ios::trunc); f << s_music;
-            }
-        }
-        // 실제(화면 있는) 재생이 화면 없이 돌린 경로와 같은지 프레임마다 비교 → 처음 달라지는 곳을 showcase_diff.txt 에 남김
-        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && g_cnt.done && !g_cnt.busy && !g_cnt.internal && !g_cnt.fullRef.empty() && m_player1 && !g_cnt.diffSaved) {
-            int t = fwcTick(m_gameState.m_currentProgress);
-            bool dead = m_player1->m_isDead;
-            if (t > 0 && t < (int)g_cnt.fullRef.size()) {
-                auto const& r = g_cnt.fullRef[t];
-                float x = m_player1->getPositionX(), y = m_player1->getPositionY(); double v = m_player1->m_yVelocity;
-                bool same = x == r.x && y == r.y && v == r.v;
-                float rot = m_player1->getRotation();
-                if (g_cnt.diffCount < 12 && (!same || dead || t % 200 == 0)) {
-                    g_cnt.diffLog += fmt::format("tick {} {}: real x {:.4f} y {:.4f} v {:.4f} rot {:.2f} | fast x {:.4f} y {:.4f} v {:.4f} rot {:.2f} | dt {:.6f} dead {}\n", t, same ? "same" : "DIFF", x, y, v, rot, r.x, r.y, r.v, r.rot, dt, (int)dead);
-                    if (!same || dead) ++g_cnt.diffCount;
-                }
-            }
-            if (dead || g_cnt.diffCount >= 12 || t >= (int)g_cnt.fullRef.size() - 2) {
-                std::ofstream f(Mod::get()->getConfigDir() / "showcase_diff.txt", std::ios::binary | std::ios::trunc);
-                f << g_cnt.diffLog;
-                g_cnt.diffSaved = true;
-            }
-        }
     }
 
     void processCommands(float dt, bool isHalfTick, bool isLastTick) {
         GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
         auto pl = PlayLayer::get();
         if (!pl || static_cast<GJBaseGameLayer*>(pl) != this || !m_player1) return;
-        if (g_probe.on) {
+        if (g_mac.on) {
             int tick = fwcTick(m_gameState.m_currentProgress);
-            if (g_probe.cmdLog < 24) {       // 처음 24번: 이 함수가 한 틱에 몇 번, 어떤 값으로 불리는지 기록
-                ++g_probe.cmdLog;
-                g_probe.out += fmt::format("cmd dt={:.6f} half={} last={} progress={} time240={:.3f}\n", dt, (int)isHalfTick, (int)isLastTick, (unsigned)m_gameState.m_currentProgress, m_gameState.m_levelTime * 240.0);
-            }
-            if (g_probe.forceHold > 0) {     // 되돌린 직후: 게임이 누름을 풀어 버리므로 매크로 상태대로 다시 맞춤
-                --g_probe.forceHold;
-                if (g_probe.heldAt(tick) && !m_player1->m_holdingButtons[1]) GJBaseGameLayer::handleButton(true, 1, true);
-            }
-            if (tick != g_probe.lastTick) {  // 같은 틱에 두 번 불려도 입력은 한 번만 넣음
-                g_probe.lastTick = tick;
-                auto const& inp = g_cnt.useTrial ? g_cnt.trial : g_probe.inputs;
+            if (tick != g_mac.lastTick) {  // 같은 틱에 두 번 불려도 입력은 한 번만 넣음
+                g_mac.lastTick = tick;
+                auto const& inp = g_cnt.useTrial ? g_cnt.trial : g_mac.inputs;
                 auto it = inp.find(tick);
                 if (it != inp.end()) for (bool down : it->second) this->handleButton(down, 1, true);
             }
         }
-        if (!g_traceOn || g_trace.size() > 8000000) return;
-        auto p = m_player1;
-        g_trace += fmt::format("{},{:.9f},{:.4f},{:.4f},{:.5f},{},{},{},{},{},{},{},{},{},{}\n",
-            (int)m_gameState.m_currentProgress, m_gameState.m_levelTime * 240.0, p->getPositionX(), p->getPositionY(), p->m_yVelocity,
-            (int)p->m_isShip, (int)p->m_isBird, (int)p->m_isBall, (int)p->m_isDart, (int)p->m_isRobot, (int)p->m_isSpider, (int)p->m_isSwing,
-            (int)p->m_isUpsideDown, p->m_vehicleSize < 1.0f ? 1 : 0, (int)p->m_holdingButtons[1]);
     }
 
     void handleButton(bool down, int button, bool isPlayer1) {
@@ -1164,22 +1012,12 @@ class $modify(FwcGameLayer, GJBaseGameLayer) {
         if (!pl || static_cast<GJBaseGameLayer*>(pl) != this) return;
         int tick = fwcTick(m_gameState.m_currentProgress);
         int i = matchPress(tick, down);
-        {   // 진단 기록 (처음 60번만): 실제 누른 틱과 계산 결과의 가장 가까운 누름 틱을 로그에 남김
-            static int s_logged = 0;
-            if (s_logged < 60) {
-                ++s_logged;
-                int nearT = -1, nd = 1 << 30;
-                for (auto const& p : g_data->presses) { int d = std::abs(p.tick - tick); if (d < nd) { nd = d; nearT = p.tick; } }
-                log::info("누름 진단: progress {} / levelTime*240 {:.1f} / 맞춘 번호 {} / 가장 가까운 계산 틱 {} (차이 {})",
-                          tick, m_gameState.m_levelTime * 240.0, i, nearT, nd);
-            }
-        }
         if (i < 0) return;                                     // 계산 경로에 없는 누름은 안 셈
         g_used[i] = true;
         if (g_data->presses[i].window > MAX_SHOWN_WINDOW) return;   // 너무 넓은 윈도우는 표시하지 않음 (판에도 안 세고 고리도 안 그림)
         g_count[binOf(g_data->presses[i].window)] += 1;
         g_lastIdx = std::max(g_lastIdx, i);
-        if (Mod::get()->getSettingValue<bool>("show-rings") && m_objectLayer) {
+        if (g_showRings && m_objectLayer) {
             auto pl1 = isPlayer1 ? m_player1 : m_player2;
             if (pl1) {
                 auto ring = makeRing(g_data->presses[i].window, pl1->getPosition());
@@ -1270,9 +1108,12 @@ class $modify(FwcApp, AppDelegate) {
 
 // 녹화 중에는 게임 전체의 "프레임 시간"을 영상 한 프레임(1/60초)으로 고정한다.
 //   파티클·트레일 같은 화면 효과는 이 시간으로 움직이므로, 고정하지 않으면 영상에서 너무 느리거나 끊겨 보인다.
+//   실제 한 프레임 동안 이 갱신을 REC_PER_FRAME 번 연달아 돌린다 (한 번 = 영상 한 프레임 = 게임 4틱 + 파티클·트레일 1/60초).
+//   전에는 실제 한 프레임에 영상 한 프레임이라 녹화 속도가 게임 fps 에 묶여 있었음. 화면에는 마지막 상태만 보임 (빨리 감기처럼 보임)
+static constexpr int REC_PER_FRAME = 4;
 class $modify(FwcSched, CCScheduler) {
     void update(float dt) {
-        if (g_rec.active) dt = 1.f / (float)g_rec.fps;
-        CCScheduler::update(dt);
+        if (!g_rec.active) { CCScheduler::update(dt); return; }
+        for (int k = 0; k < REC_PER_FRAME && g_rec.active; ++k) CCScheduler::update(1.f / (float)g_rec.fps);
     }
 };
