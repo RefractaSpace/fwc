@@ -33,11 +33,34 @@
             "name": "Play macro (by this mod)",
             "description": "Plays the macro in the mod config folder. Copy your Eclipse replay there and rename it to macro.gdr2 (240 TPS only). Do not use together with Eclipse playback."
         },
+        "macro-record": {
+            "type": "bool",
+            "default": false,
+            "name": "Record macro (by this mod)",
+            "description": "Records your own play. When you beat the level it is saved as macro.txt (the old one is copied to macro_prev.txt). In practice mode, dying and continuing keeps the inputs up to the checkpoint. Turned off while 'Play macro' is on."
+        },
+        "record-cbf": {
+            "type": "string",
+            "default": "off",
+            "one-of": [
+                "off",
+                "fwc",
+                "cbf-mod"
+            ],
+            "name": "Between-frame inputs when recording",
+            "description": "off: inputs are saved on ticks (240 per second). fwc: this mod places each input between ticks itself (1/8000 s), and the Click Between Frames mod is paused while you play. cbf-mod: keep the Click Between Frames mod on; the position inside the tick is estimated from how far the player moved."
+        },
         "count-windows": {
             "type": "bool",
             "default": false,
             "name": "Count windows in game",
             "description": "Needs 'Play macro'. When the level starts, the mod replays the macro without drawing and counts the frame window of every click, then shows the result."
+        },
+        "count-cbf": {
+            "type": "bool",
+            "default": false,
+            "name": "Count at 8000 fps (CBF)",
+            "description": "After finding the window in whole ticks, also searches inside the edge ticks in 1/8000 s steps (about 12 more tries per input, counting takes about twice as long). Results are shown with one decimal."
         },
         "record-video": {
             "type": "bool",
