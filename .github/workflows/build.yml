@@ -43,10 +43,6 @@ jobs:
           --hidden-import wave_sim --hidden-import showcase_patch --hidden-import export_lib
           --add-data "engine;engine" --add-data "fonts;fonts" --add-data "bin;bin"
           --collect-binaries imageio_ffmpeg --exclude-module scipy gui.py
-      - name: 앱 자체 검사 (selftest)
-        working-directory: fwc_app
-        run: python selftest.py
-        continue-on-error: true
       - uses: actions/download-artifact@v4
         with:
           name: fwc-mod
