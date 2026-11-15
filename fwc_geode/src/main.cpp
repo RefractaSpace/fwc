@@ -230,18 +230,24 @@ static inline int fwcTick(unsigned progress) { return (int)(progress / 2); }
 
 // ── 틱 사이 입력 (CBF 방식) ──
 //   입력 시각 = 틱 + 위치(0 이상 1 미만). 위치 0 = 지금까지와 같은 "틱 시작" 입력.
-//   위치는 1/8000초 단위로 맞춤: 1틱(1/240초) = 33.33칸. 시각을 "1/8000초 번호" 정수 u 로 바꾸면 틱 = u*240/8000 의 몫, 위치 = 나머지/8000
+//   위치는 1/8000초(= 0.03틱) 단위로 맞춤. 1틱 = 33.33칸이라 딱 나누어떨어지지 않으므로, 칸은 틱마다 0부터 다시 셈:
+//   위치 = k × 0.03틱 (k = 0..33). 시각 번호 u = 틱 × 34 + k (순서 비교용 정수)
 static constexpr int SUB_HZ = 8000;
 static constexpr double SUB_TICK = 240.0 / SUB_HZ;                 // 1/8000초를 틱으로 = 0.03틱
+static constexpr int SUB_K = 34;                                   // 한 틱 안 칸 번호 0..33
 struct In {
     bool down = false; float frac = 0.f;
     In(bool d = false, float f = 0.f) : down(d), frac(f) {}
     operator bool() const { return down; }                       // 예전 코드(누름만 보던 곳)는 그대로 동작
 };
 using Inputs = std::map<int, std::vector<In>>;
-static long long subUnits(double t) { return std::llround(t * SUB_HZ / 240.0); }          // 시각(틱) → 1/8000초 번호
-static void subSplit(long long u, int& tick, float& frac) {                              // 1/8000초 번호 → 틱 + 위치
-    long long a = u * 240; tick = (int)(a / SUB_HZ); frac = (float)((a % SUB_HZ) / (double)SUB_HZ);
+static long long subUnits(double t) {                                                     // 시각(틱) → 시각 번호
+    double T = std::floor(t + 1e-9); long long k = std::llround((t - T) / SUB_TICK);
+    if (k >= SUB_K) { T += 1; k = 0; }                                                     // 틱 끝에 붙으면 다음 틱 시작
+    return (long long)T * SUB_K + k;
+}
+static void subSplit(long long u, int& tick, float& frac) {                              // 시각 번호 → 틱 + 위치
+    tick = (int)(u / SUB_K); frac = (float)((u % SUB_K) * SUB_TICK);
 }
 static void inputsAdd(Inputs& m, double t, bool down) {                                  // 시각 t(틱) 에 입력 하나 (1/8000초에 맞춤)
     int tk; float fr; subSplit(subUnits(t), tk, fr);
