@@ -14,6 +14,8 @@
   --no-shortcut         바로 가기 안 만듦
   --no-mod              모드 안 넣음
   --mods-dir <폴더>     모드를 넣을 폴더를 직접 지정 (지메 찾기 건너뜀)
+  --macro <파일>        이클립스 매크로(.gdr2)를 모드 설정 폴더에 macro.gdr2 로 넣고 "Play macro" 를 켬
+  --settings-dir <폴더> (시험용) 모드 설정 파일(settings.json) 폴더를 직접 지정
 """
 import os
 import re
@@ -24,9 +26,11 @@ import zipfile
 import subprocess
 import threading
 import traceback
+import json
 
 APP_NAME = "GD 프레임 윈도우 카운터"
-MOD_FILE = "fwc.window-counter.geode"
+MOD_ID = "fwc.window-counter"
+MOD_FILE = MOD_ID + ".geode"
 EXE_NAME = "GD_FWC.exe"
 
 
@@ -103,7 +107,44 @@ def make_shortcut(exe, workdir, log):
     return True
 
 
-def install(log, target, shortcut=True, mod=True, mods_dir=None, progress=None):
+def gd_running():
+    """지메가 켜져 있나 (켜져 있으면 끌 때 모드 설정을 다시 써서, 우리가 바꾼 설정이 덮일 수 있음)"""
+    if os.name != "nt":
+        return False
+    try:
+        pr = subprocess.run(["tasklist", "/FO", "CSV", "/NH"], capture_output=True, text=True, creationflags=0x08000000)
+        return "geometrydash" in pr.stdout.lower()
+    except OSError:
+        return False
+
+
+def put_macro(log, macro, config_dir, settings_dir):
+    """매크로를 모드 설정 폴더에 macro.gdr2 로 넣고, 모드 설정 "Play macro" 를 켠다.
+       - 복사는 copyfile(수정 시각 = 지금): 모드는 macro.gdr2 가 macro.txt 보다 새것일 때 변환하므로
+       - 설정 파일이 이미 있으면 macro-play 한 줄만 바꾸고, 읽을 수 없으면 건드리지 않음"""
+    os.makedirs(config_dir, exist_ok=True)
+    dst = os.path.join(config_dir, "macro.gdr2")
+    shutil.copyfile(macro, dst)
+    log("  매크로 넣음: %s" % dst)
+    sp = os.path.join(settings_dir, "settings.json")
+    data = {}
+    if os.path.isfile(sp):
+        try:
+            with open(sp, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("형식이 다름")
+        except (OSError, ValueError) as e:
+            log("  [주의] 모드 설정 파일을 읽지 못해 그대로 둠 (%s). 게임에서 Play macro 를 직접 켜세요." % e)
+            return
+    data["macro-play"] = True
+    os.makedirs(settings_dir, exist_ok=True)
+    with open(sp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=4)
+    log("  모드 설정: Play macro 켬 (%s)" % sp)
+
+
+def install(log, target, shortcut=True, mod=True, mods_dir=None, progress=None, macro=None, settings_dir=None):
     """설치 본체. 돌려주는 값: (성공?, 앱 실행 파일 경로)"""
     payload = os.path.join(res_dir(), "payload")
     app_zip = os.path.join(payload, "GD_FWC.zip")
@@ -111,6 +152,14 @@ def install(log, target, shortcut=True, mod=True, mods_dir=None, progress=None):
     if not os.path.isfile(app_zip):
         log("[오류] 설치 파일 안에 앱이 없어요 (payload\\GD_FWC.zip).")
         return False, None
+    if macro:
+        try:
+            with open(macro, "rb") as f:
+                head = f.read(3)
+        except OSError as e:
+            log("[주의] 매크로 파일을 열 수 없어 매크로는 건너뜀: %s" % e); macro = None; head = b""
+        if macro and head != b"GDR":
+            log("[주의] 이클립스 .gdr2 매크로가 아니라서 매크로는 건너뜀: %s" % macro); macro = None
 
     # 1) 앱 풀기 (같은 이름 파일은 덮어쓰고, 지우지는 않음)
     log("[1/3] 앱 설치 → %s" % target)
@@ -151,6 +200,9 @@ def install(log, target, shortcut=True, mod=True, mods_dir=None, progress=None):
         os.makedirs(mods_dir, exist_ok=True)
         shutil.copy2(mod_src, os.path.join(mods_dir, MOD_FILE))
         log("  모드 넣음: %s" % os.path.join(mods_dir, MOD_FILE))
+        if macro:
+            put_macro(log, macro, os.path.join(os.path.dirname(os.path.abspath(mods_dir)), "config", MOD_ID),
+                      settings_dir or os.path.join(os.path.dirname(os.path.abspath(mods_dir)), "settings_test"))
     else:
         games = find_games()
         if not games:
@@ -167,6 +219,17 @@ def install(log, target, shortcut=True, mod=True, mods_dir=None, progress=None):
                 log("  모드 넣음: %s" % dst)
             except OSError as e:
                 log("  [주의] 모드를 못 넣었어요 (%s): %s" % (dst, e))
+                continue
+            if macro:
+                # 설정 폴더: <지메 폴더>\geode\config\<모드 id> / 설정 파일: %LOCALAPPDATA%\<지메 실행 파일 이름>\geode\mods\<모드 id>
+                stem = os.path.splitext(x)[0]
+                sdir = settings_dir or os.path.join(os.environ.get("LOCALAPPDATA", ""), stem, "geode", "mods", MOD_ID)
+                try:
+                    put_macro(log, macro, os.path.join(d, "geode", "config", MOD_ID), sdir)
+                except OSError as e:
+                    log("  [주의] 매크로를 못 넣었어요: %s" % e)
+        if macro and gd_running():
+            log("  [주의] 지메가 켜져 있어요. 지메를 끈 다음 이 설치를 한 번 더 하세요 (켜진 지메가 끌 때 설정을 덮어씀).")
     log("")
     log("설치 끝. 모드는 지오드 v5.11.2 이상 + 지메 2.2081 에서만 켜집니다.")
     log("지메가 켜져 있었다면 껐다가 다시 켜야 모드가 보입니다.")
@@ -180,13 +243,13 @@ def run_gui():
 
     root = tk.Tk()
     root.title(APP_NAME + " 설치")
-    root.geometry("640x460")
+    root.geometry("640x520")
     root.resizable(False, False)
 
     frm = ttk.Frame(root, padding=14)
     frm.pack(fill="both", expand=True)
     ttk.Label(frm, text=APP_NAME + " 설치", font=("Malgun Gothic", 14, "bold")).pack(anchor="w")
-    ttk.Label(frm, text="앱과 지오드 모드를 설치합니다. 게임 파일은 고치지 않고, 인터넷도 쓰지 않습니다.",
+    ttk.Label(frm, text="앱과 지오드 모드(그리고 고른 매크로)를 설치합니다. 게임 파일은 고치지 않고, 인터넷도 쓰지 않습니다.",
               font=("Malgun Gothic", 9)).pack(anchor="w", pady=(2, 10))
 
     row = ttk.Frame(frm)
@@ -201,6 +264,20 @@ def run_gui():
         if d:
             var_dir.set(os.path.join(os.path.normpath(d), "GD_FWC"))
     ttk.Button(row, text="바꾸기", command=pick).pack(side="left")
+
+    row2 = ttk.Frame(frm)
+    row2.pack(fill="x", pady=(8, 0))
+    ttk.Label(row2, text="매크로 (선택)", font=("Malgun Gothic", 9)).pack(side="left")
+    var_mac = tk.StringVar(value="")
+    ttk.Entry(row2, textvariable=var_mac).pack(side="left", fill="x", expand=True, padx=6)
+
+    def pick_macro():
+        f = filedialog.askopenfilename(title="이클립스 매크로 고르기", filetypes=[("이클립스 매크로", "*.gdr2"), ("모든 파일", "*.*")])
+        if f:
+            var_mac.set(os.path.normpath(f))
+    ttk.Button(row2, text="고르기", command=pick_macro).pack(side="left")
+    ttk.Label(frm, text="고르면 모드 설정 폴더에 macro.gdr2 로 넣고 Play macro 를 켜 둡니다 (240 TPS 이클립스 매크로).",
+              font=("Malgun Gothic", 8)).pack(anchor="w")
 
     var_sc = tk.BooleanVar(value=True)
     var_mod = tk.BooleanVar(value=True)
@@ -234,7 +311,8 @@ def run_gui():
 
     def work():
         try:
-            ok, exe = install(log, var_dir.get().strip(), var_sc.get(), var_mod.get(), progress=prog)
+            ok, exe = install(log, var_dir.get().strip(), var_sc.get(), var_mod.get(), progress=prog,
+                              macro=var_mac.get().strip() or None)
         except Exception as e:
             ok, exe = False, None
             log("[오류] %s" % e)
@@ -269,7 +347,8 @@ def main():
         base = os.path.dirname(os.path.abspath(sys.executable if getattr(sys, "frozen", False) else __file__))
         lines = []
         try:
-            ok, _ = install(lines.append, val("--dir", default_dir()), "--no-shortcut" not in a, "--no-mod" not in a, val("--mods-dir"))
+            ok, _ = install(lines.append, val("--dir", default_dir()), "--no-shortcut" not in a, "--no-mod" not in a, val("--mods-dir"),
+                            macro=val("--macro"), settings_dir=val("--settings-dir"))
         except Exception as e:
             ok = False
             lines.append("[오류] %s\n%s" % (e, traceback.format_exc(limit=3)))
