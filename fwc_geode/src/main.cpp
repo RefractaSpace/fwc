@@ -24,8 +24,6 @@
 #include <chrono>
 #include <fstream>
 #include <filesystem>
-#include <iterator>
-#include "gdr2.hpp"
 
 using namespace geode::prelude;
 
@@ -228,37 +226,11 @@ static void probeSave() {
     std::ofstream f(Mod::get()->getConfigDir() / "probe.txt", std::ios::binary | std::ios::trunc);
     f << g_probe.out;
 }
-// 이클립스 매크로 바로 읽기: 설정 폴더의 macro.gdr2 가 macro.txt 보다 새것(또는 macro.txt 없음)이면 macro.txt 로 변환한다.
-//   기존 macro.txt 는 macro_prev.txt 로 복사해 둔다. 결과는 macro_import.txt 에 적는다.
-static void probeImportGdr2(std::filesystem::path const& dir) {
-    std::error_code ec;
-    auto src = dir / "macro.gdr2", dst = dir / "macro.txt";
-    if (!std::filesystem::exists(src, ec)) return;
-    if (std::filesystem::exists(dst, ec)) {
-        auto ts = std::filesystem::last_write_time(src, ec); if (ec) return;
-        auto td = std::filesystem::last_write_time(dst, ec); if (ec) return;
-        if (ts <= td) return;                                              // 이미 변환했음
-    }
-    auto note = [&](std::string const& msg) { std::ofstream o(dir / "macro_import.txt", std::ios::binary | std::ios::trunc); o << msg << "\n"; };
-    std::string bytes;
-    { std::ifstream in(src, std::ios::binary); bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()); }
-    std::vector<std::pair<int, bool>> ev; FwcGdr2Info info; std::string err;
-    if (!fwcReadGdr2(bytes, ev, info, err)) { note("FAILED: " + err); return; }
-    if (std::fabs(info.tps - 240.0) > 0.01) { note(fmt::format("FAILED: macro is {} TPS, this mod needs 240 TPS", info.tps)); return; }
-    if (ev.empty()) { note("FAILED: no player 1 jump inputs in macro.gdr2"); return; }
-    if (std::filesystem::exists(dst, ec)) std::filesystem::copy_file(dst, dir / "macro_prev.txt", std::filesystem::copy_options::overwrite_existing, ec);
-    {
-        std::ofstream o(dst, std::ios::binary | std::ios::trunc);
-        for (auto const& e : ev) o << e.first << ' ' << (e.second ? 1 : 0) << "\n";
-    }
-    note(fmt::format("OK: {} inputs from macro.gdr2 (level '{}', skipped: {} player-2 inputs, {} left/right inputs)", ev.size(), info.levelName, info.p2Inputs, info.otherButtons));
-}
 static void probeLoad() {
     g_probe = Probe{};
     auto dir = Mod::get()->getConfigDir();
     if (!Mod::get()->getSettingValue<bool>("macro-play")) return;          // 설정: 모드가 매크로 재생
     g_probe.test = Mod::get()->getSettingValue<bool>("probe-test");        // 설정: 시험(속도·되돌리기 측정)
-    probeImportGdr2(dir);                                                  // 설정 폴더에 macro.gdr2 (이클립스 매크로)가 새로 들어왔으면 macro.txt 로 바꿔 둔다
     std::ifstream f(dir / "macro.txt");
     int t, d; int n = 0;
     while (f >> t >> d) { g_probe.inputs[t].push_back(d != 0); ++n; }

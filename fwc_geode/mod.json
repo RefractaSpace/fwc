@@ -31,7 +31,7 @@
             "type": "bool",
             "default": false,
             "name": "Play macro (by this mod)",
-            "description": "Plays the macro in the mod config folder. Copy your Eclipse replay there and rename it to macro.gdr2 (240 TPS only). Do not use together with Eclipse playback."
+            "description": "Plays macro.txt from the mod config folder. Do not use together with Eclipse playback."
         },
         "count-windows": {
             "type": "bool",
