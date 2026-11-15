@@ -1,0 +1,8 @@
+__pycache__/
+build/
+build_*/
+dist*/
+fwc_installer/payload/
+fwc_installer/_test_install/
+*.pyc
+*.pdb

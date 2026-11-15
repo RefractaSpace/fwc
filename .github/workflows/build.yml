@@ -1,0 +1,75 @@
+# FWC 빌드: 깃허브의 윈도우 서버에서 (1) 지오드 모드 .geode (2) 분석 앱 (3) 설치 exe 를 만든다.
+# 결과는 Actions 실행 화면의 Artifacts 에 올라간다. 직접 돌리려면 Actions → FWC build → Run workflow.
+name: FWC build
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  mod:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: geode-sdk/build-geode-mod@main
+        with:
+          path: fwc_geode
+          sdk: given          # mod.json 의 geode 5.11.2 를 그대로 씀 (PC 빌드와 같은 버전)
+          target: Win64
+          combine: true
+      - uses: geode-sdk/build-geode-mod/combine@main
+        id: combine
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fwc-mod
+          path: ${{ steps.combine.outputs.build-output }}/*.geode
+
+  app-and-setup:
+    needs: mod
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: 모듈 설치
+        run: python -m pip install PySide6 numpy pillow msgpack imageio-ffmpeg pyinstaller
+      - name: 분석 앱 빌드 (fwc_app/build.bat 과 같은 인자)
+        working-directory: fwc_app
+        run: >
+          python -m PyInstaller --noconfirm --windowed --name GD_FWC --workpath build_ci --distpath dist_ci
+          --paths engine --hidden-import gdplay --hidden-import partrun --hidden-import trigmove --hidden-import gdwave2
+          --hidden-import wave_sim --hidden-import showcase_patch --hidden-import export_lib
+          --add-data "engine;engine" --add-data "fonts;fonts" --add-data "bin;bin"
+          --collect-binaries imageio_ffmpeg --exclude-module scipy gui.py
+      - name: 앱 자체 검사 (selftest)
+        working-directory: fwc_app
+        run: python selftest.py
+        continue-on-error: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: fwc-mod
+          path: modout
+      - name: 설치 exe 묶기 (fwc_installer/build_setup.bat 과 같은 방식)
+        working-directory: fwc_installer
+        run: |
+          New-Item -ItemType Directory -Force payload | Out-Null
+          Copy-Item ..\modout\fwc.window-counter.geode payload\ -Force
+          python -c "import zipfile, os; src=r'..\fwc_app\dist_ci\GD_FWC'; z=zipfile.ZipFile(r'payload\GD_FWC.zip','w',zipfile.ZIP_DEFLATED,compresslevel=6); [z.write(os.path.join(d,f), os.path.relpath(os.path.join(d,f),src)) for d,_,fs in os.walk(src) for f in fs]; z.close()"
+          python -m PyInstaller --noconfirm --onefile --windowed --name GD_FWC_Setup --workpath build_setup --distpath dist_setup --add-data "payload;payload" fwc_setup.py
+      - name: 설치 시험 (창 없이, 임시 폴더에)
+        working-directory: fwc_installer
+        run: |
+          $d = Join-Path $env:RUNNER_TEMP "inst"; $m = Join-Path $env:RUNNER_TEMP "mods"
+          New-Item -ItemType Directory -Force $m | Out-Null
+          Start-Process dist_setup\GD_FWC_Setup.exe -ArgumentList "--quiet","--dir",$d,"--no-shortcut","--mods-dir",$m -Wait
+          Get-Content dist_setup\fwc_setup_log.txt -ErrorAction SilentlyContinue
+          if (-not (Test-Path (Join-Path $d "GD_FWC.exe"))) { throw "앱이 안 풀림" }
+          if (-not (Test-Path (Join-Path $m "fwc.window-counter.geode"))) { throw "모드가 안 들어감" }
+          "설치 시험 통과"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GD_FWC_Setup
+          path: fwc_installer/dist_setup/GD_FWC_Setup.exe

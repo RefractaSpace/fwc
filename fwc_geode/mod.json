@@ -1,0 +1,66 @@
+{
+    "geode": "5.11.2",
+    "gd": {
+        "win": "2.2081"
+    },
+    "id": "fwc.window-counter",
+    "name": "FWC Window Counter",
+    "version": "v1.0.0",
+    "developer": "fwc",
+    "description": "Shows frame windows in game in real time (uses results from the FWC app)",
+    "settings": {
+        "enabled": {
+            "type": "bool",
+            "default": true,
+            "name": "Show window counter",
+            "description": "Turn off to hide the panel, numbers and rings in game."
+        },
+        "show-rings": {
+            "type": "bool",
+            "default": true,
+            "name": "Rings at click position",
+            "description": "Leave a colored ring and the window number where each click happened."
+        },
+        "click-sounds": {
+            "type": "bool",
+            "default": false,
+            "name": "Click sounds",
+            "description": "Plays a click sound on every press and release. To use your own sounds, put press.wav and release.wav in the mod config folder 'clicks'."
+        },
+        "macro-play": {
+            "type": "bool",
+            "default": false,
+            "name": "Play macro (by this mod)",
+            "description": "Plays the macro in the mod config folder. Copy your Eclipse replay there and rename it to macro.gdr2 (240 TPS only). Do not use together with Eclipse playback."
+        },
+        "count-windows": {
+            "type": "bool",
+            "default": false,
+            "name": "Count windows in game",
+            "description": "Needs 'Play macro'. When the level starts, the mod replays the macro without drawing and counts the frame window of every click, then shows the result."
+        },
+        "record-video": {
+            "type": "bool",
+            "default": false,
+            "name": "Record video",
+            "description": "Needs 'Play macro'. Replays the macro from the start and records showcase.mp4 (1280x720, 60 fps, no sound) into the mod config folder. Needs ffmpeg_path.txt there."
+        },
+        "probe-test": {
+            "type": "bool",
+            "default": false,
+            "name": "Test: speed and rewind check",
+            "description": "Developer test. Runs once at 5 seconds while the macro plays and writes probe.txt."
+        },
+        "trace": {
+            "type": "bool",
+            "default": false,
+            "name": "Record positions",
+            "description": "Developer option. Saves the real player position every tick to trace.csv."
+        }
+    },
+    "resources": {
+        "files": [
+            "resources/*.wav"
+        ]
+    }
+}
