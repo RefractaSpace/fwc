@@ -1219,7 +1219,11 @@ class $modify(FwcAudio, FMODAudioEngine) {
         if (g_cnt.busy) return;
         FMODAudioEngine::setMusicTimeMS(time, dontWait, musicID);
     }
+#ifdef FWC_GD2209
+    void playMusic(std::string path, bool shouldLoop, float fadeInTime, int channel) {   // 2.209: gd::string 대신 std::string
+#else
     void playMusic(gd::string path, bool shouldLoop, float fadeInTime, int channel) {
+#endif
         if (g_cnt.busy) return;
         FMODAudioEngine::playMusic(path, shouldLoop, fadeInTime, channel);
     }
@@ -1265,7 +1269,11 @@ class $modify(FwcMenu, MenuLayer) {
                 g_autorun = true;
                 lvl->retain();
                 Loader::get()->queueInMainThread([lvl]() {
+                    #ifdef FWC_GD2209
+                    CCDirector::get()->replaceScene(PlayLayer::scene(lvl, false));
+#else
                     CCDirector::get()->replaceScene(PlayLayer::scene(lvl, false, false));
+#endif
                     lvl->release();
                 });
                 break;
