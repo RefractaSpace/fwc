@@ -589,40 +589,53 @@ class $modify(FwcPlayLayer, PlayLayer) {
         recWrite();
     }
     // ── 영상 앞 소개 화면 (3초) ──
-    //   왼쪽: 레벨 이름, 부제(설정), 제목, 왼쪽 아래 숫자 설명 / 오른쪽: 기준(Vanilla 240 FPS)과 칸별 범례 (프레임 수, 프레임 퍼펙트 Hz, ms)
+    //   참고 영상의 소개 화면(1920x1080)을 픽셀로 재서 같은 비율로 배치. 글자 크기는 "기준 줄의 폭"으로 맞춤:
+    //     범례 묶음: "9-12 Frames (~20Hz FP)" 폭 = 화면 폭 41.4% (아래 설명 2줄도 같은 크기)
+    //     제목 묶음: "Frame Window" 폭 = 36.0% (레벨 이름·부제도 같은 크기, 왼쪽 칸 47%를 넘으면 그 줄만 줄임)
+    //     머리줄: "Vanilla 240 FPS" 폭 = 29.4%
     //   범례 숫자는 계산: 1프레임 = 1000/240 ms, Hz = 240 / 그 칸의 가장 넓은 윈도우
     CCNode* makeIntro() {
         auto ws = CCDirector::get()->getWinSize();
         auto root = CCLayerColor::create({0, 0, 0, 255}, ws.width, ws.height);
-        auto add = [&](std::string const& txt, CCPoint pos, CCPoint anchor, float scale, ccColor3B col, float maxW) {
+        auto widthAt1 = [](const char* txt) {
+            auto l = CCLabelBMFont::create(txt, "bigFont.fnt");
+            return l ? std::max(1.f, l->getContentSize().width) : 1.f;
+        };
+        const float sLeg = 0.414f * ws.width / widthAt1("9-12 Frames (~20Hz FP)");
+        const float sTit = 0.360f * ws.width / widthAt1("Frame Window");
+        const float sHdr = 0.294f * ws.width / widthAt1("Vanilla 240 FPS");
+        // xf, yf: 화면 비율 (yf 는 위에서부터), ax: 0 왼쪽 맞춤 / 1 오른쪽 맞춤
+        auto add = [&](std::string const& txt, float xf, float yf, float ax, float scale, ccColor3B col, float maxWf) {
             auto l = CCLabelBMFont::create(txt.c_str(), "bigFont.fnt");
-            l->setAnchorPoint(anchor); l->setScale(scale); l->setColor(col); l->setPosition(pos);
+            if (!l) return;
             float w = l->getContentSize().width * scale;
-            if (maxW > 0 && w > maxW) l->setScale(scale * maxW / w);       // 칸을 넘으면 줄임
+            if (maxWf > 0 && w > maxWf * ws.width) scale *= maxWf * ws.width / w;
+            l->setAnchorPoint({ax, 0.5f}); l->setScale(scale); l->setColor(col);
+            l->setPosition({xf * ws.width, (1.f - yf) * ws.height});
             root->addChild(l);
-            return l;
         };
         const ccColor3B white = {255, 255, 255}, gray = {140, 140, 140};
-        const float lx = ws.width * 0.05f, colW = ws.width * 0.44f;
         std::string name = g_cnt.levelName;
         for (auto& ch : name) ch = (char)std::toupper((unsigned char)ch);
         std::string sub = Mod::get()->getSettingValue<std::string>("intro-subtitle");
-        add(name, {lx, ws.height * 0.74f}, {0.f, 0.5f}, 0.75f, white, colW);
-        if (!sub.empty()) add(sub, {lx, ws.height * 0.64f}, {0.f, 0.5f}, 0.6f, white, colW);
-        add("Frame Window", {lx, ws.height * 0.46f}, {0.f, 0.5f}, 0.6f, white, colW);
-        add(fmt::format("Counter ({}F)", MAX_SHOWN_WINDOW), {lx, ws.height * 0.37f}, {0.f, 0.5f}, 0.6f, white, colW);
-        add("Bottom left: progress %", {lx, ws.height * 0.11f}, {0.f, 0.5f}, 0.32f, gray, colW);
-        add("and raw precision (24h) in sigma/s", {lx, ws.height * 0.05f}, {0.f, 0.5f}, 0.32f, gray, colW);
-        // 오른쪽 범례: 칸별 (가장 좁은, 가장 넓은) 윈도우
-        const int lo[NBIN] = {17, 13, 9, 7, 5, 4, 3, 2, 1};
-        const int hi[NBIN] = {MAX_SHOWN_WINDOW, 16, 12, 8, 6, 4, 3, 2, 1};
-        const float rx = ws.width * 0.95f, top = ws.height * 0.93f, step = ws.height * 0.092f, rw = ws.width * 0.46f;
-        add("Vanilla 240 FPS", {rx, top}, {1.f, 0.5f}, 0.42f, BIN_COLOR[0], rw);
+        const float L = 0.043f, LW = 0.47f;
+        add(name, L, 0.255f, 0.f, sTit, white, LW);
+        if (!sub.empty()) add(sub, L, 0.353f, 0.f, sTit, white, LW);
+        add("Frame Window", L, 0.549f, 0.f, sTit, white, LW);
+        add(fmt::format("Counter ({}F)", MAX_SHOWN_WINDOW), L, 0.645f, 0.f, sTit, white, LW);
+        add("(Bottom Left Number)", 0.010f, 0.889f, 0.f, sLeg, gray, 0.52f);
+        add("Raw Precision (24h) in sigma/s", 0.010f, 0.955f, 0.f, sLeg, white, 0.52f);
+        const float R = 0.958f;
+        add("Vanilla 240 FPS", R, 0.040f, 1.f, sHdr, BIN_COLOR[0], 0.f);
+        // 범례: 9-12 부터 1 까지 7칸 (17+, 13+ 는 넓은 칸이라 소개 화면에서는 생략), 칸마다 2줄
+        const int lo[7] = {9, 7, 5, 4, 3, 2, 1}, hi[7] = {12, 8, 6, 4, 3, 2, 1}, bin[7] = {2, 3, 4, 5, 6, 7, 8};
         auto ms = [](int f) { return f * 1000.0 / 240.0; };
-        for (int i = 0; i < NBIN; ++i) {
-            std::string fr = lo[i] == hi[i] ? fmt::format("{} Frame{}", lo[i], lo[i] == 1 ? "" : "s") : fmt::format("{}-{} Frames", lo[i], hi[i]);
-            std::string range = lo[i] == hi[i] ? fmt::format("{:.1f}ms", ms(lo[i])) : fmt::format("{:.1f}-{:.1f}ms", ms(lo[i]), ms(hi[i]));
-            add(fmt::format("{} (~{}Hz FP)  {}", fr, (int)std::lround(240.0 / hi[i]), range), {rx, top - step * (i + 1)}, {1.f, 0.5f}, 0.32f, BIN_COLOR[i], rw);
+        for (int k = 0; k < 7; ++k) {
+            int a = lo[k], b = hi[k];
+            std::string l1 = (a != b ? fmt::format("{}-{} Frames", a, b) : fmt::format("{} Frame{}", a, a > 1 ? "s" : "")) + fmt::format(" (~{}Hz FP)", (int)std::lround(240.0 / b));
+            std::string l2 = a != b ? fmt::format("({:.1f}ms, {:.1f}ms)", ms(a), ms(b)) : fmt::format("({:.1f}ms)", ms(a));
+            add(l1, R, 0.104f + 0.1333f * k, 1.f, sLeg, BIN_COLOR[bin[k]], 0.f);
+            add(l2, R, 0.104f + 0.1333f * k + 0.0667f, 1.f, sLeg, BIN_COLOR[bin[k]], 0.f);
         }
         return root;
     }
