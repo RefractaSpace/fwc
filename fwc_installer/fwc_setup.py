@@ -149,8 +149,9 @@ def install(log, target, shortcut=True, mod=True, mods_dir=None, progress=None, 
     payload = os.path.join(res_dir(), "payload")
     app_zip = os.path.join(payload, "GD_FWC.zip")
     mod_src = os.path.join(payload, MOD_FILE)
-    if not os.path.isfile(app_zip):
-        log("[오류] 설치 파일 안에 앱이 없어요 (payload\\GD_FWC.zip).")
+    lite = not os.path.isfile(app_zip)          # 가벼운 설치 파일: 앱 없이 모드(+매크로)만
+    if lite and not os.path.isfile(mod_src):
+        log("[오류] 설치 파일 안에 앱도 모드도 없어요.")
         return False, None
     if macro:
         try:
@@ -161,34 +162,41 @@ def install(log, target, shortcut=True, mod=True, mods_dir=None, progress=None, 
         if macro and head != b"GDR":
             log("[주의] 이클립스 .gdr2 매크로가 아니라서 매크로는 건너뜀: %s" % macro); macro = None
 
-    # 1) 앱 풀기 (같은 이름 파일은 덮어쓰고, 지우지는 않음)
-    log("[1/3] 앱 설치 → %s" % target)
-    os.makedirs(target, exist_ok=True)
-    with zipfile.ZipFile(app_zip) as z:
-        names = z.namelist()
-        tgt_abs = os.path.abspath(target)
-        for i, nm in enumerate(names):
-            dst = os.path.abspath(os.path.join(target, nm))
-            if not (dst == tgt_abs or dst.startswith(tgt_abs + os.sep)):
-                log("[오류] 이상한 경로가 들어 있어 멈춤: %s" % nm)
-                return False, None
-            z.extract(nm, target)
-            if progress and i % 50 == 0:
-                progress(i / max(1, len(names)))
-    exe = os.path.join(target, EXE_NAME)
-    if not os.path.isfile(exe):
-        log("[오류] 풀기 실패: %s 가 없어요." % exe)
-        return False, None
-    log("  파일 %d개 설치됨" % len([n for n in names if not n.endswith("/")]))
-    if progress:
-        progress(1.0)
-
-    # 2) 바로 가기
-    if shortcut:
-        log("[2/3] 바탕 화면 바로 가기")
-        make_shortcut(exe, target, log)
-    else:
+    exe = None
+    if lite:
+        log("[1/3] 앱: 이 설치 파일에는 없음 (모드만 설치)")
         log("[2/3] 바로 가기: 건너뜀")
+        if progress:
+            progress(1.0)
+    # 1) 앱 풀기 (같은 이름 파일은 덮어쓰고, 지우지는 않음)
+    if not lite:
+        log("[1/3] 앱 설치 → %s" % target)
+        os.makedirs(target, exist_ok=True)
+        with zipfile.ZipFile(app_zip) as z:
+            names = z.namelist()
+            tgt_abs = os.path.abspath(target)
+            for i, nm in enumerate(names):
+                dst = os.path.abspath(os.path.join(target, nm))
+                if not (dst == tgt_abs or dst.startswith(tgt_abs + os.sep)):
+                    log("[오류] 이상한 경로가 들어 있어 멈춤: %s" % nm)
+                    return False, None
+                z.extract(nm, target)
+                if progress and i % 50 == 0:
+                    progress(i / max(1, len(names)))
+        exe = os.path.join(target, EXE_NAME)
+        if not os.path.isfile(exe):
+            log("[오류] 풀기 실패: %s 가 없어요." % exe)
+            return False, None
+        log("  파일 %d개 설치됨" % len([n for n in names if not n.endswith("/")]))
+        if progress:
+            progress(1.0)
+
+        # 2) 바로 가기
+        if shortcut:
+            log("[2/3] 바탕 화면 바로 가기")
+            make_shortcut(exe, target, log)
+        else:
+            log("[2/3] 바로 가기: 건너뜀")
 
     # 3) 지오드 모드
     log("[3/3] 지오드 모드")
@@ -243,9 +251,12 @@ def run_gui():
 
     root = tk.Tk()
     root.title(APP_NAME + " 설치")
+    if not os.path.isfile(os.path.join(res_dir(), "payload", "GD_FWC.zip")):
+        root.title(APP_NAME + " 모드 설치")
     root.geometry("640x520")
     root.resizable(False, False)
 
+    lite = not os.path.isfile(os.path.join(res_dir(), "payload", "GD_FWC.zip"))
     frm = ttk.Frame(root, padding=14)
     frm.pack(fill="both", expand=True)
     ttk.Label(frm, text=APP_NAME + " 설치", font=("Malgun Gothic", 14, "bold")).pack(anchor="w")
@@ -253,7 +264,8 @@ def run_gui():
               font=("Malgun Gothic", 9)).pack(anchor="w", pady=(2, 10))
 
     row = ttk.Frame(frm)
-    row.pack(fill="x")
+    if not lite:
+        row.pack(fill="x")
     ttk.Label(row, text="설치 폴더", font=("Malgun Gothic", 9)).pack(side="left")
     var_dir = tk.StringVar(value=default_dir())
     ent = ttk.Entry(row, textvariable=var_dir)
@@ -281,7 +293,8 @@ def run_gui():
 
     var_sc = tk.BooleanVar(value=True)
     var_mod = tk.BooleanVar(value=True)
-    ttk.Checkbutton(frm, text="바탕 화면에 바로 가기 만들기", variable=var_sc).pack(anchor="w", pady=(8, 0))
+    if not lite:
+        ttk.Checkbutton(frm, text="바탕 화면에 바로 가기 만들기", variable=var_sc).pack(anchor="w", pady=(8, 0))
     ttk.Checkbutton(frm, text="지오드 모드 넣기 (게임 안 실시간 표시)", variable=var_mod).pack(anchor="w")
 
     bar = ttk.Progressbar(frm, maximum=100)
