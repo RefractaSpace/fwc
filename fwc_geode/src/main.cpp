@@ -26,6 +26,9 @@
 #include <filesystem>
 #include <iterator>
 #include "gdr2.hpp"
+#ifdef FWC_GD2209
+#include <asp/fs/std.hpp>
+#endif
 
 using namespace geode::prelude;
 
@@ -66,8 +69,19 @@ static std::vector<bool> g_used;     // 계산 누름 중 이미 센 것
 static int g_lastIdx = -1;           // 마지막으로 센 누름 번호 (σ/s 표시용)
 static std::vector<Ref<CCNode>> g_rings;   // 누른 자리 고리 (레벨 화면에 붙어 같이 움직임)
 
+// 설정 폴더 (지오드 5: std::filesystem::path, 지오드 6: asp::fs::Path 라서 여기서 맞춤)
+static std::filesystem::path fwcCfg() {
+#ifdef FWC_GD2209
+    auto r = Mod::get()->getConfigDir().toStdPath();
+    if (r.isOk()) return r.unwrap();
+    return {};
+#else
+    return Mod::get()->getConfigDir();
+#endif
+}
+
 static std::filesystem::path levelsDir() {
-    return Mod::get()->getConfigDir() / "levels";
+    return fwcCfg() / "levels";
 }
 
 static std::optional<LevelData> loadFor(std::string const& name) {
@@ -78,7 +92,11 @@ static std::optional<LevelData> loadFor(std::string const& name) {
         log::info("결과 파일 없음: {}", path.string());
         return std::nullopt;
     }
+#ifdef FWC_GD2209
+    auto res = utils::file::readJson(asp::fs::Path::fromStdPath(path));
+#else
     auto res = utils::file::readJson(path);
+#endif
     if (!res) {
         log::warn("결과 파일 읽기 실패: {}", res.unwrapErr());
         return std::nullopt;
@@ -225,7 +243,7 @@ struct Probe {
 static Probe g_probe;
 static void probeSave() {
     if (!g_probe.on || g_probe.out.empty()) return;
-    std::ofstream f(Mod::get()->getConfigDir() / "probe.txt", std::ios::binary | std::ios::trunc);
+    std::ofstream f(fwcCfg() / "probe.txt", std::ios::binary | std::ios::trunc);
     f << g_probe.out;
 }
 // 이클립스 매크로 바로 읽기: 설정 폴더의 macro.gdr2 가 macro.txt 보다 새것(또는 macro.txt 없음)이면 macro.txt 로 변환한다.
@@ -255,7 +273,7 @@ static void probeImportGdr2(std::filesystem::path const& dir) {
 }
 static void probeLoad() {
     g_probe = Probe{};
-    auto dir = Mod::get()->getConfigDir();
+    auto dir = fwcCfg();
     if (!Mod::get()->getSettingValue<bool>("macro-play")) return;          // 설정: 모드가 매크로 재생
     g_probe.test = Mod::get()->getSettingValue<bool>("probe-test");        // 설정: 시험(속도·되돌리기 측정)
     probeImportGdr2(dir);                                                  // 설정 폴더에 macro.gdr2 (이클립스 매크로)가 새로 들어왔으면 macro.txt 로 바꿔 둔다
@@ -375,7 +393,7 @@ static void clickLoad() {
     g_clickOn = Mod::get()->getSettingValue<bool>("click-sounds");
     if (!g_clickOn) return;
     std::error_code ec;
-    auto user = Mod::get()->getConfigDir() / "clicks";            // 내 소리를 넣으면 그걸 씀
+    auto user = fwcCfg() / "clicks";            // 내 소리를 넣으면 그걸 씀
     auto res = Mod::get()->getResourcesDir();
     auto pick = [&](const char* userName, const char* resName) {
         auto u = user / userName;
@@ -392,7 +410,7 @@ static int g_traceAttempt = 0;
 static void traceFlush() {
     if (!g_traceOn || g_trace.empty()) return;
     // 시도마다 이어 씀 (레벨을 새로 열면 파일을 새로 시작). 머리줄에 모드 재생 여부를 적음
-    std::ofstream f(Mod::get()->getConfigDir() / "trace.csv", std::ios::binary | (g_traceAttempt == 0 ? std::ios::trunc : std::ios::app));
+    std::ofstream f(fwcCfg() / "trace.csv", std::ios::binary | (g_traceAttempt == 0 ? std::ios::trunc : std::ios::app));
     f << "# attempt " << ++g_traceAttempt << " modplay=" << (g_probe.on ? 1 : 0) << "\n";
     f << "progress,leveltime240,x,y,yvel,ship,ufo,ball,wave,robot,spider,swing,upside,mini,hold\n" << g_trace;
     g_trace.clear();
@@ -409,8 +427,13 @@ class $modify(FwcPlayLayer, PlayLayer) {
         FwcHud* m_hud = nullptr;
     };
 
+#ifdef FWC_GD2209
+    bool init(GJGameLevel* level, bool dontCreateObjects) {                     // 2.209: 인자 2개
+        if (!PlayLayer::init(level, dontCreateObjects)) return false;
+#else
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
+#endif
         g_data = loadFor(std::string(level->m_levelName));
         if (!Mod::get()->getSettingValue<bool>("enabled")) g_data.reset();      // 설정에서 끄면 표시·집계 안 함
         g_traceOn = Mod::get()->getSettingValue<bool>("trace"); g_trace.clear(); g_traceAttempt = 0;
@@ -543,7 +566,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
     }
     // ───────── 영상 녹화 ─────────
     void recStart() {
-        auto dir = Mod::get()->getConfigDir();
+        auto dir = fwcCfg();
         std::string ffmpeg;
         { std::ifstream f(dir / "ffmpeg_path.txt"); std::getline(f, ffmpeg); }
         while (!ffmpeg.empty() && (ffmpeg.back() == '\r' || ffmpeg.back() == '\n' || ffmpeg.back() == ' ')) ffmpeg.pop_back();
@@ -614,7 +637,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
             fwcActionsAuto(true);
             recClose();
             g_rec.info += fmt::format("seconds taken: {:.1f}\nfinal frames: {}\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - g_rec.t0).count(), g_rec.frames);
-            std::ofstream f(Mod::get()->getConfigDir() / "record_info.txt", std::ios::binary | std::ios::trunc); f << g_rec.info;
+            std::ofstream f(fwcCfg() / "record_info.txt", std::ios::binary | std::ios::trunc); f << g_rec.info;
             g_rec.done = true;
             log::info("영상 녹화 끝: {} 프레임", g_rec.frames);
         }
@@ -684,7 +707,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
     // 물리 시험: 화면 없이 돌릴 때 실제 재생과 같은 곳에서 죽게 만드는 방법 찾기. 방법마다 죽는 틱을 physics_test.txt 에 적음
     void cntPhysicsTest() {
         std::string o;
-        auto save = [&]() { std::ofstream f(Mod::get()->getConfigDir() / "physics_test.txt", std::ios::binary | std::ios::trunc); f << o; };
+        auto save = [&]() { std::ofstream f(fwcCfg() / "physics_test.txt", std::ios::binary | std::ios::trunc); f << o; };
         int goal = g_probe.inputs.empty() ? 0 : g_probe.inputs.rbegin()->first + 240;
         auto run = [&](const char* name, int extra, bool forceObb) {
             g_cnt.useTrial = false;
@@ -715,7 +738,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         for (int i = 0; i < (int)g_cnt.ev.size(); ++i) if (g_cnt.ev[i].second) g_cnt.pressIdx.push_back(i);
     }
     void cntSaveMacro(const char* backupName) {     // 지금 입력을 macro.txt 로 저장 (기존 파일은 backupName 으로 한 번만 보관)
-        auto dir = Mod::get()->getConfigDir(); std::error_code ec;
+        auto dir = fwcCfg(); std::error_code ec;
         if (!std::filesystem::exists(dir / backupName, ec)) std::filesystem::copy_file(dir / "macro.txt", dir / backupName, ec);
         std::ofstream f(dir / "macro.txt", std::ios::binary | std::ios::trunc);
         for (auto const& kv : g_probe.inputs) for (bool dn : kv.second) f << kv.first << " " << (dn ? 1 : 0) << "\n";
@@ -733,7 +756,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
     // 매크로 합치기: 설정 폴더에 macro_part2.txt(스타트포스에서 찍은 뒷부분)와 merge_x.txt(그 스타트포스의 x)가 있으면,
     //   앞부분(macro.txt)이 그 x 에 닿는 틱을 찾아 거기서부터 뒷부분을 이어 붙인다. 이음매가 안 맞는 곳은 자동 고침이 맞춘다.
     void cntMerge() {
-        auto dir = Mod::get()->getConfigDir();
+        auto dir = fwcCfg();
         std::map<int, std::vector<bool>> partB; double X = 0; int nB = 0;
         { std::ifstream f(dir / "macro_part2.txt"); int t, d; while (f >> t >> d) { partB[t].push_back(d != 0); ++nB; } }
         { std::ifstream f(dir / "merge_x.txt"); f >> X; }
@@ -884,7 +907,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         }
         js += "  ]\n}\n";
         { std::ofstream f(levelsDir() / (safe + ".json"), std::ios::binary | std::ios::trunc); f << js; }
-        { std::ofstream f(Mod::get()->getConfigDir() / "windows_ingame.txt", std::ios::binary | std::ios::trunc); f << tb; }
+        { std::ofstream f(fwcCfg() / "windows_ingame.txt", std::ios::binary | std::ios::trunc); f << tb; }
         log::info("윈도우 세기 끝: 누름 {}개, {:.1f}초, 시도 {}번", g_cnt.res.size(), sec, g_cnt.trials);
         cntSetLabel(g_cnt.failed ? "FWC counting stopped (error)" : fmt::format("FWC done: {} inputs, {:.0f}s", g_cnt.res.size(), sec));
         // 결과를 바로 화면에 쓰기
@@ -1099,7 +1122,7 @@ class $modify(FwcGameLayer, GJBaseGameLayer) {
                 auto fm = FMODAudioEngine::sharedEngine();
                 s_music += fmt::format("tick {} leveltime {:.4f} music_ms {} length_ms {} offset_field {} playing {}\n", t, m_gameState.m_levelTime,
                                        fm->getMusicTimeMS(0), fm->getMusicLengthMS(0), fm->m_musicOffset, (int)fm->isMusicPlaying(0));
-                std::ofstream f(Mod::get()->getConfigDir() / "music_info.txt", std::ios::binary | std::ios::trunc); f << s_music;
+                std::ofstream f(fwcCfg() / "music_info.txt", std::ios::binary | std::ios::trunc); f << s_music;
             }
         }
         // 실제(화면 있는) 재생이 화면 없이 돌린 경로와 같은지 프레임마다 비교 → 처음 달라지는 곳을 showcase_diff.txt 에 남김
@@ -1117,7 +1140,7 @@ class $modify(FwcGameLayer, GJBaseGameLayer) {
                 }
             }
             if (dead || g_cnt.diffCount >= 12 || t >= (int)g_cnt.fullRef.size() - 2) {
-                std::ofstream f(Mod::get()->getConfigDir() / "showcase_diff.txt", std::ios::binary | std::ios::trunc);
+                std::ofstream f(fwcCfg() / "showcase_diff.txt", std::ios::binary | std::ios::trunc);
                 f << g_cnt.diffLog;
                 g_cnt.diffSaved = true;
             }
@@ -1231,7 +1254,7 @@ class $modify(FwcMenu, MenuLayer) {
         if (s_done) return true;
         s_done = true;
         std::string name;
-        { std::ifstream f(Mod::get()->getConfigDir() / "autorun.txt"); std::getline(f, name); }
+        { std::ifstream f(fwcCfg() / "autorun.txt"); std::getline(f, name); }
         while (!name.empty() && (name.back() == '\r' || name.back() == '\n' || name.back() == ' ')) name.pop_back();
         if (name.empty()) return true;
         auto arr = LocalLevelManager::get()->m_localLevels;

@@ -16,4 +16,10 @@ endif()
 
 add_subdirectory($ENV{GEODE_SDK} ${CMAKE_CURRENT_BINARY_DIR}/geode)
 
+# 지메 2.209x(지오드 6) 용 코드 고르기
+if (DEFINED GEODE_GD_VERSION AND GEODE_GD_VERSION VERSION_GREATER_EQUAL 2.209)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE FWC_GD2209)
+    message(STATUS "FWC: GD ${GEODE_GD_VERSION} 용 코드")
+endif()
+
 setup_geode_mod(${PROJECT_NAME})
