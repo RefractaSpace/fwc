@@ -14,6 +14,7 @@
 #include <Geode/utils/file.hpp>
 #include <Windows.h>
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <climits>
 #include <cmath>
@@ -554,9 +555,28 @@ class $modify(FwcPlayLayer, PlayLayer) {
         g_rec.frames = 0; g_rec.active = true; g_rec.t0 = std::chrono::steady_clock::now();
         fwcActionsAuto(false);
         float songOffset = m_levelSettings ? m_levelSettings->m_songOffset : 0.f;
-        g_rec.info = fmt::format("output: {}\nsize: {}x{} fps {}\nsong id: {}\nsong offset: {}\nstart tick: {}\nstart leveltime: {:.6f}\n", out, g_rec.w, g_rec.h, g_rec.fps,
+        g_rec.info.clear();
+        recIntro();                          // 소개 화면 3초 (설정에서 끌 수 있음). 노래를 입힐 때 이만큼 늦춰야 함 → record_info.txt 에 적음
+        g_rec.info += fmt::format("output: {}\nsize: {}x{} fps {}\nsong id: {}\nsong offset: {}\nstart tick: {}\nstart leveltime: {:.6f}\n", out, g_rec.w, g_rec.h, g_rec.fps,
                                  m_level ? (int)m_level->m_songID : 0, songOffset, cntTick(), m_gameState.m_levelTime);
         log::info("영상 녹화 시작");
+    }
+    void recCapture(CCNode* node) {         // node 를 녹화 버퍼에 그려서 g_rec.buf 로 읽어 옴
+        GLint oldFbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &oldFbo);
+        glBindFramebuffer(GL_FRAMEBUFFER, g_rec.fbo);
+        glViewport(0, 0, g_rec.w, g_rec.h);
+        glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+        node->visit();
+        glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        glReadPixels(0, 0, g_rec.w, g_rec.h, GL_RGBA, GL_UNSIGNED_BYTE, g_rec.buf.data());
+        glBindFramebuffer(GL_FRAMEBUFFER, oldFbo);
+        CCDirector::get()->setViewport();
+    }
+    bool recWrite() {                       // g_rec.buf 한 장을 ffmpeg 로 보냄
+        DWORD wr = 0; size_t off = 0, n = g_rec.buf.size();
+        while (off < n) { if (!WriteFile(g_rec.hWrite, g_rec.buf.data() + off, (DWORD)std::min<size_t>(n - off, 1 << 22), &wr, nullptr) || wr == 0) { g_rec.active = false; g_rec.info += "write to ffmpeg failed\n"; return false; } off += wr; }
+        ++g_rec.frames;
+        return true;
     }
     void recFrame() {                       // 4틱 진행 후 한 프레임 캡처
         for (int k = 0; k < 240 / g_rec.fps; ++k) {
@@ -565,18 +585,54 @@ class $modify(FwcPlayLayer, PlayLayer) {
             GJBaseGameLayer::update(1.f / 240.f);
             g_cnt.internal = false;
         }
-        GLint oldFbo = 0; glGetIntegerv(GL_FRAMEBUFFER_BINDING, &oldFbo);
-        glBindFramebuffer(GL_FRAMEBUFFER, g_rec.fbo);
-        glViewport(0, 0, g_rec.w, g_rec.h);
-        glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
-        this->visit();
-        glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        glReadPixels(0, 0, g_rec.w, g_rec.h, GL_RGBA, GL_UNSIGNED_BYTE, g_rec.buf.data());
-        glBindFramebuffer(GL_FRAMEBUFFER, oldFbo);
-        CCDirector::get()->setViewport();
-        DWORD wr = 0; size_t off = 0, n = g_rec.buf.size();
-        while (off < n) { if (!WriteFile(g_rec.hWrite, g_rec.buf.data() + off, (DWORD)std::min<size_t>(n - off, 1 << 22), &wr, nullptr) || wr == 0) { g_rec.active = false; g_rec.info += "write to ffmpeg failed\n"; break; } off += wr; }
-        ++g_rec.frames;
+        recCapture(this);
+        recWrite();
+    }
+    // ── 영상 앞 소개 화면 (3초) ──
+    //   왼쪽: 레벨 이름, 부제(설정), 제목, 왼쪽 아래 숫자 설명 / 오른쪽: 기준(Vanilla 240 FPS)과 칸별 범례 (프레임 수, 프레임 퍼펙트 Hz, ms)
+    //   범례 숫자는 계산: 1프레임 = 1000/240 ms, Hz = 240 / 그 칸의 가장 넓은 윈도우
+    CCNode* makeIntro() {
+        auto ws = CCDirector::get()->getWinSize();
+        auto root = CCLayerColor::create({0, 0, 0, 255}, ws.width, ws.height);
+        auto add = [&](std::string const& txt, CCPoint pos, CCPoint anchor, float scale, ccColor3B col, float maxW) {
+            auto l = CCLabelBMFont::create(txt.c_str(), "bigFont.fnt");
+            l->setAnchorPoint(anchor); l->setScale(scale); l->setColor(col); l->setPosition(pos);
+            float w = l->getContentSize().width * scale;
+            if (maxW > 0 && w > maxW) l->setScale(scale * maxW / w);       // 칸을 넘으면 줄임
+            root->addChild(l);
+            return l;
+        };
+        const ccColor3B white = {255, 255, 255}, gray = {140, 140, 140};
+        const float lx = ws.width * 0.05f, colW = ws.width * 0.44f;
+        std::string name = g_cnt.levelName;
+        for (auto& ch : name) ch = (char)std::toupper((unsigned char)ch);
+        std::string sub = Mod::get()->getSettingValue<std::string>("intro-subtitle");
+        add(name, {lx, ws.height * 0.74f}, {0.f, 0.5f}, 0.75f, white, colW);
+        if (!sub.empty()) add(sub, {lx, ws.height * 0.64f}, {0.f, 0.5f}, 0.6f, white, colW);
+        add("Frame Window", {lx, ws.height * 0.46f}, {0.f, 0.5f}, 0.6f, white, colW);
+        add(fmt::format("Counter ({}F)", MAX_SHOWN_WINDOW), {lx, ws.height * 0.37f}, {0.f, 0.5f}, 0.6f, white, colW);
+        add("Bottom left: progress %", {lx, ws.height * 0.11f}, {0.f, 0.5f}, 0.32f, gray, colW);
+        add("and raw precision (24h) in sigma/s", {lx, ws.height * 0.05f}, {0.f, 0.5f}, 0.32f, gray, colW);
+        // 오른쪽 범례: 칸별 (가장 좁은, 가장 넓은) 윈도우
+        const int lo[NBIN] = {17, 13, 9, 7, 5, 4, 3, 2, 1};
+        const int hi[NBIN] = {MAX_SHOWN_WINDOW, 16, 12, 8, 6, 4, 3, 2, 1};
+        const float rx = ws.width * 0.95f, top = ws.height * 0.93f, step = ws.height * 0.092f, rw = ws.width * 0.46f;
+        add("Vanilla 240 FPS", {rx, top}, {1.f, 0.5f}, 0.42f, BIN_COLOR[0], rw);
+        auto ms = [](int f) { return f * 1000.0 / 240.0; };
+        for (int i = 0; i < NBIN; ++i) {
+            std::string fr = lo[i] == hi[i] ? fmt::format("{} Frame{}", lo[i], lo[i] == 1 ? "" : "s") : fmt::format("{}-{} Frames", lo[i], hi[i]);
+            std::string range = lo[i] == hi[i] ? fmt::format("{:.1f}ms", ms(lo[i])) : fmt::format("{:.1f}-{:.1f}ms", ms(lo[i]), ms(hi[i]));
+            add(fmt::format("{} (~{}Hz FP)  {}", fr, (int)std::lround(240.0 / hi[i]), range), {rx, top - step * (i + 1)}, {1.f, 0.5f}, 0.32f, BIN_COLOR[i], rw);
+        }
+        return root;
+    }
+    void recIntro() {
+        if (!Mod::get()->getSettingValue<bool>("record-intro")) return;
+        Ref<CCNode> intro = makeIntro();
+        recCapture(intro);
+        const int n = g_rec.fps * 3;                         // 3초 (같은 그림을 그대로 반복)
+        for (int i = 0; i < n && g_rec.active; ++i) recWrite();
+        g_rec.info += fmt::format("intro seconds: {:.3f} (frames {})\n", n / (double)g_rec.fps, n);
     }
     void recWork() {                        // 실제 한 프레임마다 영상 프레임 몇 개씩
         for (int i = 0; i < 1 && g_rec.active; ++i) {     // 실제 한 프레임 = 영상 한 프레임 (파티클·트레일이 영상 시간에 맞게 움직이도록)

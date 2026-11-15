@@ -44,6 +44,18 @@
             "default": false,
             "name": "Record video",
             "description": "Needs 'Play macro'. Replays the macro from the start and records showcase.mp4 (1280x720, 60 fps, no sound) into the mod config folder. Needs ffmpeg_path.txt there."
+        },
+        "record-intro": {
+            "type": "bool",
+            "default": true,
+            "name": "Intro screen in video",
+            "description": "Adds a 3 second intro (level name, title and the frame window legend) at the start of showcase.mp4."
+        },
+        "intro-subtitle": {
+            "type": "string",
+            "default": "",
+            "name": "Intro subtitle",
+            "description": "Optional second line under the level name on the intro screen (for example a list placement). Leave empty to hide."
         }
     },
     "resources": {
