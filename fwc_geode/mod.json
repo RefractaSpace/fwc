@@ -1,7 +1,7 @@
 {
-    "geode": "5.11.2",
+    "geode": "6.0.0-alpha.2",
     "gd": {
-        "win": "2.2081"
+        "win": "2.2091"
     },
     "id": "fwc.window-counter",
     "name": "FWC Window Counter",
