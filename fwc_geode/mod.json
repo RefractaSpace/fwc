@@ -33,6 +33,24 @@
             "name": "Play macro (by this mod)",
             "description": "Plays the macro in the mod config folder. Copy your Eclipse replay there and rename it to macro.gdr2 (240 TPS only). Do not use together with Eclipse playback."
         },
+        "macro-file": {
+            "type": "file",
+            "default": "",
+            "name": "Macro file",
+            "description": "Pick the macro to play: an Eclipse replay (.gdr2, 240 TPS) or a macro.txt (also ones recorded by this mod with CBF). It is copied into the mod folder the next time you open a level. 'Play macro' must be on.",
+            "control": {
+                "dialog": "open",
+                "filters": [
+                    {
+                        "description": "Macro (.gdr2, .txt)",
+                        "files": [
+                            "*.gdr2",
+                            "*.txt"
+                        ]
+                    }
+                ]
+            }
+        },
         "macro-record": {
             "type": "bool",
             "default": false,

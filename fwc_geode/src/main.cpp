@@ -273,8 +273,27 @@ struct Macro {
     bool heldAt(int t) const { bool h = false; for (auto const& kv : inputs) { if (kv.first > t) break; for (bool dn : kv.second) h = dn; } return h; }
 };
 static Macro g_mac;
-// 이클립스 매크로 바로 읽기: 설정 폴더의 macro.gdr2 가 macro.txt 보다 새것(또는 macro.txt 없음)이면 macro.txt 로 변환한다.
-//   기존 macro.txt 는 macro_prev.txt 로 복사해 둔다. 결과는 macro_import.txt 에 적는다.
+// 이클립스 .gdr2 → macro.txt 변환. 성공하면 기존 macro.txt 는 macro_prev.txt 로 복사해 둠. 결과 문장을 돌려줌 ("OK: ..." / "FAILED: ...")
+static std::string macroConvertGdr2(std::filesystem::path const& src, std::filesystem::path const& dir) {
+    std::error_code ec;
+    auto dst = dir / "macro.txt";
+    std::string bytes;
+    { std::ifstream in(src, std::ios::binary); bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()); }
+    std::vector<std::pair<int, bool>> ev; FwcGdr2Info info; std::string err;
+    if (!fwcReadGdr2(bytes, ev, info, err)) return "FAILED: " + err;
+    if (std::fabs(info.tps - 240.0) > 0.01) return fmt::format("FAILED: macro is {} TPS, this mod needs 240 TPS", info.tps);
+    if (ev.empty()) return "FAILED: no player 1 jump inputs";
+    if (std::filesystem::exists(dst, ec)) std::filesystem::copy_file(dst, dir / "macro_prev.txt", std::filesystem::copy_options::overwrite_existing, ec);
+    {
+        std::ofstream o(dst, std::ios::binary | std::ios::trunc);
+        for (auto const& e : ev) o << e.first << ' ' << (e.second ? 1 : 0) << "\n";
+    }
+    return fmt::format("OK: {} inputs (level '{}', skipped: {} player-2 inputs, {} left/right inputs)", ev.size(), info.levelName, info.p2Inputs, info.otherButtons);
+}
+static void macroNote(std::filesystem::path const& dir, std::string const& msg) {
+    std::ofstream o(dir / "macro_import.txt", std::ios::binary | std::ios::trunc); o << msg << "\n";
+}
+// 설정 폴더에 macro.gdr2 를 직접 넣은 경우: macro.txt 보다 새것(또는 macro.txt 없음)이면 변환
 static void macroImportGdr2(std::filesystem::path const& dir) {
     std::error_code ec;
     auto src = dir / "macro.gdr2", dst = dir / "macro.txt";
@@ -284,19 +303,36 @@ static void macroImportGdr2(std::filesystem::path const& dir) {
         auto td = std::filesystem::last_write_time(dst, ec); if (ec) return;
         if (ts <= td) return;                                              // 이미 변환했음
     }
-    auto note = [&](std::string const& msg) { std::ofstream o(dir / "macro_import.txt", std::ios::binary | std::ios::trunc); o << msg << "\n"; };
-    std::string bytes;
-    { std::ifstream in(src, std::ios::binary); bytes.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()); }
-    std::vector<std::pair<int, bool>> ev; FwcGdr2Info info; std::string err;
-    if (!fwcReadGdr2(bytes, ev, info, err)) { note("FAILED: " + err); return; }
-    if (std::fabs(info.tps - 240.0) > 0.01) { note(fmt::format("FAILED: macro is {} TPS, this mod needs 240 TPS", info.tps)); return; }
-    if (ev.empty()) { note("FAILED: no player 1 jump inputs in macro.gdr2"); return; }
-    if (std::filesystem::exists(dst, ec)) std::filesystem::copy_file(dst, dir / "macro_prev.txt", std::filesystem::copy_options::overwrite_existing, ec);
-    {
-        std::ofstream o(dst, std::ios::binary | std::ios::trunc);
-        for (auto const& e : ev) o << e.first << ' ' << (e.second ? 1 : 0) << "\n";
+    macroNote(dir, "macro.gdr2 -> " + macroConvertGdr2(src, dir));
+}
+// 게임 안 설정 "Macro file" 에서 고른 파일: 처음 고르거나 파일이 바뀌었을 때만 macro.txt 로 가져옴
+//   (.gdr2 는 변환, .txt 는 그대로 복사 — FWC 로 녹화한 틱 안 위치도 유지). 가져온 뒤에는 macro.txt 를 쓰므로 자동 고침 결과도 남음.
+//   어떤 파일을 언제 가져왔는지는 macro_source.txt 에 적어 둠
+static void macroImportPicked(std::filesystem::path const& dir) {
+    std::filesystem::path src;
+    try { src = Mod::get()->getSettingValue<std::filesystem::path>("macro-file"); } catch (...) { return; }
+    std::error_code ec;
+    if (src.empty() || !std::filesystem::is_regular_file(src, ec)) return;
+    auto mt = std::filesystem::last_write_time(src, ec); if (ec) return;
+    std::string stamp = fmt::format("{}|{}", src.string(), (long long)mt.time_since_epoch().count());
+    {   std::ifstream f(dir / "macro_source.txt"); std::string old; std::getline(f, old);
+        if (old == stamp) return; }                                       // 이미 가져온 파일
+    std::string ext = src.extension().string();
+    for (auto& c : ext) c = (char)std::tolower((unsigned char)c);
+    std::string msg;
+    if (ext == ".txt") {
+        Inputs tmp;
+        int n = macroRead(src, tmp);
+        if (n <= 0) msg = "FAILED: no inputs in the text file";
+        else {
+            if (std::filesystem::exists(dir / "macro.txt", ec)) std::filesystem::copy_file(dir / "macro.txt", dir / "macro_prev.txt", std::filesystem::copy_options::overwrite_existing, ec);
+            std::filesystem::copy_file(src, dir / "macro.txt", std::filesystem::copy_options::overwrite_existing, ec);
+            msg = ec ? "FAILED: copy error " + ec.message() : fmt::format("OK: {} inputs (text)", n);
+        }
     }
-    note(fmt::format("OK: {} inputs from macro.gdr2 (level '{}', skipped: {} player-2 inputs, {} left/right inputs)", ev.size(), info.levelName, info.p2Inputs, info.otherButtons));
+    else msg = macroConvertGdr2(src, dir);                                // .gdr2 (이클립스)
+    macroNote(dir, src.filename().string() + " -> " + msg);
+    if (msg.rfind("OK", 0) == 0) { std::ofstream f(dir / "macro_source.txt", std::ios::binary | std::ios::trunc); f << stamp << "\n"; }
 }
 // 매크로 파일 읽기: 줄마다 "틱 누름 [틱 안 위치]". 위치가 없거나 범위 밖이면 0 (틱 시작). 읽은 입력 수를 돌려줌
 static int macroRead(std::filesystem::path const& path, Inputs& out) {
@@ -315,6 +351,7 @@ static void macroLoad() {
     auto dir = Mod::get()->getConfigDir();
     if (!Mod::get()->getSettingValue<bool>("macro-play")) return;          // 설정: 모드가 매크로 재생
     macroImportGdr2(dir);                                                  // 설정 폴더에 macro.gdr2 (이클립스 매크로)가 새로 들어왔으면 macro.txt 로 바꿔 둔다
+    macroImportPicked(dir);                                                // 게임 설정에서 고른 매크로 파일 (새로 고른 경우만)
     int n = macroRead(dir / "macro.txt", g_mac.inputs);
     g_mac.on = n > 0;
 }
