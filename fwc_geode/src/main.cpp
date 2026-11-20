@@ -273,6 +273,18 @@ struct Macro {
     bool heldAt(int t) const { bool h = false; for (auto const& kv : inputs) { if (kv.first > t) break; for (bool dn : kv.second) h = dn; } return h; }
 };
 static Macro g_mac;
+// 매크로 파일 읽기: 줄마다 "틱 누름 [틱 안 위치]". 위치가 없거나 범위 밖이면 0 (틱 시작). 읽은 입력 수를 돌려줌
+static int macroRead(std::filesystem::path const& path, Inputs& out) {
+    std::ifstream f(path);
+    std::string line; int n = 0;
+    while (std::getline(f, line)) {
+        std::istringstream ls(line); int t, d; double fr = 0.0;
+        if (!(ls >> t >> d)) continue;
+        if (!(ls >> fr) || fr < 0.0 || fr >= 1.0) fr = 0.0;
+        inputsAdd(out, t + fr, d != 0); ++n;
+    }
+    return n;
+}
 // 이클립스 .gdr2 → macro.txt 변환. 성공하면 기존 macro.txt 는 macro_prev.txt 로 복사해 둠. 결과 문장을 돌려줌 ("OK: ..." / "FAILED: ...")
 static std::string macroConvertGdr2(std::filesystem::path const& src, std::filesystem::path const& dir) {
     std::error_code ec;
@@ -333,18 +345,6 @@ static void macroImportPicked(std::filesystem::path const& dir) {
     else msg = macroConvertGdr2(src, dir);                                // .gdr2 (이클립스)
     macroNote(dir, src.filename().string() + " -> " + msg);
     if (msg.rfind("OK", 0) == 0) { std::ofstream f(dir / "macro_source.txt", std::ios::binary | std::ios::trunc); f << stamp << "\n"; }
-}
-// 매크로 파일 읽기: 줄마다 "틱 누름 [틱 안 위치]". 위치가 없거나 범위 밖이면 0 (틱 시작). 읽은 입력 수를 돌려줌
-static int macroRead(std::filesystem::path const& path, Inputs& out) {
-    std::ifstream f(path);
-    std::string line; int n = 0;
-    while (std::getline(f, line)) {
-        std::istringstream ls(line); int t, d; double fr = 0.0;
-        if (!(ls >> t >> d)) continue;
-        if (!(ls >> fr) || fr < 0.0 || fr >= 1.0) fr = 0.0;
-        inputsAdd(out, t + fr, d != 0); ++n;
-    }
-    return n;
 }
 static void macroLoad() {
     g_mac = Macro{};
