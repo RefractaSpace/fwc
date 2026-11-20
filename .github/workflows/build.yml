@@ -59,12 +59,43 @@ jobs:
         run: |
           $d = Join-Path $env:RUNNER_TEMP "inst"; $m = Join-Path $env:RUNNER_TEMP "mods"
           New-Item -ItemType Directory -Force $m | Out-Null
-          Start-Process dist_setup\GD_FWC_Setup.exe -ArgumentList "--quiet","--dir",$d,"--no-shortcut","--mods-dir",$m -Wait
+          $s = Join-Path $env:RUNNER_TEMP "settings"; New-Item -ItemType Directory -Force $s | Out-Null
+          Set-Content -Path (Join-Path $s "settings.json") -Value '{"show-rings": false, "macro-play": false}' -Encoding utf8
+          $mac = (Resolve-Path ..\fwc_app\tests\sac_route.gdr2).Path
+          Start-Process dist_setup\GD_FWC_Setup.exe -ArgumentList "--quiet","--dir",$d,"--no-shortcut","--mods-dir",$m,"--macro",$mac,"--settings-dir",$s -Wait
           Get-Content dist_setup\fwc_setup_log.txt -ErrorAction SilentlyContinue
           if (-not (Test-Path (Join-Path $d "GD_FWC.exe"))) { throw "앱이 안 풀림" }
           if (-not (Test-Path (Join-Path $m "fwc.window-counter.geode"))) { throw "모드가 안 들어감" }
-          "설치 시험 통과"
+          $cm = Join-Path (Split-Path $m -Parent) "config\fwc.window-counter\macro.gdr2"
+          if ((Get-FileHash $cm).Hash -ne (Get-FileHash $mac).Hash) { throw "매크로가 안 들어감" }
+          $js = Get-Content (Join-Path $s "settings.json") -Raw | ConvertFrom-Json
+          if ($js."macro-play" -ne $true -or $js."show-rings" -ne $false) { throw "설정이 잘못 바뀜" }
+          "설치 시험 통과 (앱, 모드, 매크로, 설정)"
       - uses: actions/upload-artifact@v4
         with:
           name: GD_FWC_Setup
           path: fwc_installer/dist_setup/GD_FWC_Setup.exe
+      - name: 가벼운 설치 exe (앱 없이 모드 + 매크로 고르기만, 디스코드 20 MB 이하용)
+        working-directory: fwc_installer
+        run: |
+          New-Item -ItemType Directory -Force payload_lite | Out-Null
+          Copy-Item ..\modout\fwc.window-counter.geode payload_lite\ -Force
+          python -m PyInstaller --noconfirm --onefile --windowed --name GD_FWC_Mod_Setup --workpath build_lite --distpath dist_lite --add-data "payload_lite;payload" fwc_setup.py
+          $sz = (Get-Item dist_lite\GD_FWC_Mod_Setup.exe).Length
+          "크기: {0:N1} MB" -f ($sz / 1MB)
+          if ($sz -ge 20MB) { throw "20 MB 넘음" }
+          $m = Join-Path $env:RUNNER_TEMP "mods_lite"; $s = Join-Path $env:RUNNER_TEMP "settings_lite"
+          New-Item -ItemType Directory -Force $m | Out-Null
+          $mac = (Resolve-Path ..\fwc_app\tests\sac_route.gdr2).Path
+          Start-Process dist_lite\GD_FWC_Mod_Setup.exe -ArgumentList "--quiet","--mods-dir",$m,"--macro",$mac,"--settings-dir",$s -Wait
+          Get-Content dist_lite\fwc_setup_log.txt -ErrorAction SilentlyContinue
+          if (-not (Test-Path (Join-Path $m "fwc.window-counter.geode"))) { throw "모드가 안 들어감" }
+          $cm = Join-Path (Split-Path $m -Parent) "config\fwc.window-counter\macro.gdr2"
+          if ((Get-FileHash $cm).Hash -ne (Get-FileHash $mac).Hash) { throw "매크로가 안 들어감" }
+          $js = Get-Content (Join-Path $s "settings.json") -Raw | ConvertFrom-Json
+          if ($js."macro-play" -ne $true) { throw "설정이 안 바뀜" }
+          "가벼운 설치 시험 통과"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GD_FWC_Mod_Setup
+          path: fwc_installer/dist_lite/GD_FWC_Mod_Setup.exe

@@ -6,3 +6,4 @@ fwc_installer/payload/
 fwc_installer/_test_install/
 *.pyc
 *.pdb
+payload_lite/
