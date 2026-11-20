@@ -371,9 +371,12 @@ struct Counter {
     std::vector<int> pressIdx;                 // ev 안에서 누름의 번호
     size_t cur = 0;
     CheckpointObject* cp = nullptr; int cpTick = -1;
-    struct R { int tick, early, late; bool pair, down; double earlyF = 0, lateF = 0; };   // earlyF/lateF: CBF 세기에서 틱 안까지 잰 값(틱), 아니면 early/late 와 같음
+    struct R { int tick, early, late; bool pair, down; double earlyF = 0, lateF = 0; int dieE = -1, dieL = -1; };   // dieE/dieL: 처음 실패한 시도가 입력 뒤 몇 틱에 죽었나 (-1: 죽음이 아니라 규칙으로 실패)   // earlyF/lateF: CBF 세기에서 틱 안까지 잰 값(틱), 아니면 early/late 와 같음
     bool cbf = false;                          // 설정 "1/8000초 단위로 세기"
     std::vector<R> res;
+    std::vector<int> unmeasured;               // 되돌린 상태가 원래와 달라서 잴 수 없었던 입력 (틱)
+    bool refDied = false;                      // 이번 입력의 원래 경로(되돌린 상태에서 그대로 재생)가 중간에 죽나 = 매크로 끝
+    int lastDie = -1;                          // 마지막 시도가 죽은 틱 (-1: 안 죽음)
     Inputs trial;    // 이번 시도에 쓰는 입력
     std::chrono::steady_clock::time_point t0;
     long long ticksRun = 0; int trials = 0, resets = 0;
@@ -463,6 +466,7 @@ static void fwcActionsAuto(bool on) {
     else d->getScheduler()->pauseTarget(d->getActionManager());
 }
 static bool g_autorun = false;
+static int g_autorunStartPos = 0;           // autorun.txt 둘째 줄: 시작할 스타트포스 번호 (1 = x 가 가장 작은 것, 0 = 레벨 처음)
 // 지금 이 게임 창이 맨 앞(입력 받는 창)인가
 static bool fwcFocused() {
     HWND fg = GetForegroundWindow(); DWORD pid = 0;
@@ -518,14 +522,14 @@ static void clickLoad() {
 
 
 static bool fwcBlockPause() {
-    if (g_autorun) return true;
-    if (g_rec.want || g_rec.active || g_cnt.busy) return !fwcFocused();
+    if (g_autorun || g_rec.want || g_rec.active || g_cnt.busy) return !fwcFocused();   // 창이 뒤로 가서 생기는 자동 일시정지만 막음 (앞에서 ESC 는 됨)
     return false;
 }
 
 class $modify(FwcPlayLayer, PlayLayer) {
     struct Fields {
         FwcHud* m_hud = nullptr;
+        std::vector<StartPosObject*> m_startPos;
     };
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
@@ -974,7 +978,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         auto const& ev = g_cnt.ev;
         auto tOf = [&](int i) { return ev[i].first + (double)g_cnt.evFrac[i]; };     // 입력 시각 (틱 + 위치)
         int T = ev[pi].first;
-        bool hasRel = pi + 1 < (int)ev.size() && !ev[pi + 1].second;
+        bool hasRel = pi + 1 < (int)ev.size() && ev[pi + 1].second != ev[pi].second;   // 짝: 바로 다음의 반대 입력 (누름→뗌, 뗌→다음 누름)
         if (pair && !hasRel) return false;
         double t0 = tOf(pi), nt = t0 + d;
         double relt = hasRel ? tOf(pi + 1) : -1.0, nrel = pair ? relt + d : relt;
@@ -986,10 +990,10 @@ class $modify(FwcPlayLayer, PlayLayer) {
         g_cnt.trial = g_mac.inputs;                                       // 입력 복사 후 이 누름(과 뗌)만 옮김
         inputsRemove(g_cnt.trial, T, ev[pi].second, g_cnt.evFrac[pi]);
         inputsAdd(g_cnt.trial, nt, ev[pi].second);
-        if (pair) { inputsRemove(g_cnt.trial, ev[pi + 1].first, false, g_cnt.evFrac[pi + 1]); inputsAdd(g_cnt.trial, nrel, false); }
+        if (pair) { inputsRemove(g_cnt.trial, ev[pi + 1].first, ev[pi + 1].second, g_cnt.evFrac[pi + 1]); inputsAdd(g_cnt.trial, nrel, ev[pi + 1].second); }
         int nT = (int)std::floor(nt), relT = hasRel ? ev[pi + 1].first : -1, nRel = pair ? (int)std::floor(nrel) : relT;
         cntRestore();
-        g_cnt.useTrial = true; ++g_cnt.trials;
+        g_cnt.useTrial = true; ++g_cnt.trials; g_cnt.lastDie = -1;
         int lastChanged = std::max({T, nT, pair ? std::max(relT, nRel) : T});
         int refEnd = g_cnt.cpTick + (int)ref.size();
         // 중간 판정 시점: 바뀐 입력 뒤 "다다음 입력 + 30틱", 단 120~360틱 사이
@@ -997,11 +1001,12 @@ class $modify(FwcPlayLayer, PlayLayer) {
         for (auto const& kv : g_cnt.trial) { if (kv.first <= lastChanged) continue; if (++cnt2 == 2) { t2 = kv.first + 30; break; } }
         t2 = std::min(std::max(t2, lastChanged + Counter::REJOIN_MIN), lastChanged + Counter::REJOIN_MAX);
         int end = std::min(lastChanged + Counter::HORIZON, refEnd);
+        if (g_cnt.refDied) end = std::min(end, refEnd - 1);              // 매크로 자체가 여기서 죽음: 원래처럼 죽기 직전까지 살면 통과
         bool ok = true;
         while (cntTick() < end) {
             int before = cntTick();
             cntStep();
-            if (g_cnt.dead) { ok = false; break; }
+            if (g_cnt.dead) { ok = false; g_cnt.lastDie = cntTick(); break; }
             if (g_cnt.completed) break;
             int t = cntTick();
             if (t == before) continue;                                    // 되돌린 직후 헛도는 틱
@@ -1028,11 +1033,12 @@ class $modify(FwcPlayLayer, PlayLayer) {
         for (auto& ch : safe) if (std::string_view("\\/:*?\"<>|").find(ch) != std::string_view::npos) ch = '_';
         std::error_code ec; std::filesystem::create_directories(levelsDir(), ec);
         std::string js = "{\n  \"source\": \"geode\", \"level_end\": 0, \"cbf\": " + std::string(g_cnt.cbf ? "true" : "false") + ", \"n\": " + std::to_string(g_cnt.res.size()) + ",\n  \"windows\": [\n";
-        std::string tb = fmt::format("# 게임 안 윈도우 세기: 누름 {}개, {:.1f}초, 시도 {}번, 되돌리기 {}번({:.1f}초), 진행 {}틱({:.1f}초){}\n# tick early late window pair kind\n",
+        std::string tb = fmt::format("# 게임 안 윈도우 세기: 누름 {}개, {:.1f}초, 시도 {}번, 되돌리기 {}번({:.1f}초), 진행 {}틱({:.1f}초){}\n# tick early late window pair kind dieE dieL (dieE/dieL: 처음 실패한 시도가 입력 뒤 몇 틱에 죽었나, -1 = 죽음 아님/끝까지 됨)\n",
                                      g_cnt.res.size(), sec, g_cnt.trials, g_cnt.resets, g_cnt.msReset / 1000.0, g_cnt.ticksRun, g_cnt.msStep / 1000.0, g_cnt.msg.empty() ? "" : " (" + g_cnt.msg + ")");
         tb += "# calibration: " + g_cnt.calib + "chosen offset " + std::to_string(g_cnt.offset) + "\n";
         if (!g_cnt.merge.empty()) tb += "# merge: " + g_cnt.merge + "\n";
         tb += fmt::format("# restore check: {} ticks compared, position differs {}, rotation-only differs {}\n", g_cnt.chkTicks, g_cnt.chkPosDiff, g_cnt.chkRotDiff);
+        if (!g_cnt.unmeasured.empty()) { tb += fmt::format("# unmeasured ({}, restored state differs from a fresh run):", g_cnt.unmeasured.size()); for (int t : g_cnt.unmeasured) tb += " " + std::to_string(t); tb += "\n"; }
         if (!g_cnt.repair.empty()) tb += "# repair (" + std::to_string(g_cnt.repairs) + " changes): " + g_cnt.repair + "\n";
         for (size_t i = 0; i < g_cnt.res.size(); ++i) {
             auto const& r = g_cnt.res[i]; int w = r.early + r.late + 1;
@@ -1040,7 +1046,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
             double wf = g_cnt.cbf ? r.earlyF + r.lateF + SUB_TICK : (double)w;
             std::string extra = g_cnt.cbf ? fmt::format(", \"window_f\": {:.3f}, \"window_ms\": {:.3f}", wf, wf * 1000.0 / 240.0) : std::string();
             js += fmt::format("    {{\"kind\": \"{}\", \"tick\": {}, \"early\": {}, \"late\": {}, \"window\": {}, \"pair\": {}{}}}{}\n", r.down ? "press" : "release", r.tick, r.early, r.late, g_cnt.cbf ? (int)std::floor(wf) : w, r.pair ? "true" : "false", extra, i + 1 < g_cnt.res.size() ? "," : "");
-            tb += fmt::format("{} {} {} {} {} {}", r.tick, r.early, r.late, w, (int)r.pair, r.down ? "press" : "release");
+            tb += fmt::format("{} {} {} {} {} {} {} {}", r.tick, r.early, r.late, w, (int)r.pair, r.down ? "press" : "release", r.dieE, r.dieL);
             if (g_cnt.cbf) tb += fmt::format(" cbf {:.3f}f {:.3f}ms", wf, wf * 1000.0 / 240.0);
             tb += "\n";
         }
@@ -1077,6 +1083,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
             if (!cntStepTo(R)) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: macro dies before tick {}", T, R); cntFinish(); return; }
             cntDropCp();
             cntMakeCp();
+            cntRestore();                  // 원래 경로도 되돌린 상태에서 기록 (시도와 같은 출발점 → 되돌리기 오차가 '못 버팀'으로 잘못 세지지 않음)
         }
         // 원래 경로 기록 (저장 지점 다음 틱부터)
         std::vector<Sig> ref; bool refCompleted = false;
@@ -1100,6 +1107,12 @@ class $modify(FwcPlayLayer, PlayLayer) {
         }
         int modeAtT = (T - g_cnt.cpTick - 1 >= 0 && T - g_cnt.cpTick - 1 < (int)ref.size()) ? ref[T - g_cnt.cpTick - 1].mode : 0;
         bool holdMode = (modeAtT & (1 | 8 | 16 | 64)) != 0;      // 비행기(1)·웨이브(8)·로봇(16)·스윙(64): 누르는 길이가 중요한 모드
+        g_cnt.refDied = g_cnt.dead;
+        int deathTick = g_cnt.dead ? cntTick() : -1;
+        if (g_cnt.dead && deathTick + 4 < (int)g_cnt.fullRef.size() && g_cnt.fullRef[deathTick + 4].x != 0) {
+            // 처음부터 돌리면 사는데 되돌린 상태에서는 죽음 = 되돌리기가 원래와 다름 → 이 입력은 잴 수 없음 (1프레임으로 세지 않음)
+            g_cnt.unmeasured.push_back(T); ++g_cnt.cur; return;
+        }
         if (g_cnt.dead && g_cnt.cpTick + (int)ref.size() <= T + 1) {      // 매크로 자체가 이 누름 근처에서 죽음
             g_cnt.msg = fmt::format("macro ends (dies) near tick {}", T); cntFinish(); return;
         }
@@ -1107,13 +1120,19 @@ class $modify(FwcPlayLayer, PlayLayer) {
         if (!isPress && !holdMode) {                                     // 큐브·UFO·볼·거미에서 뗌은 타이밍이 의미 없어 세지 않음
             ++g_cnt.cur; return;
         }
-        int be = 0, bl = 0; bool bp = false;
+        // 기준 시도: 하나도 안 옮기고 되돌려서 그대로 → 이것도 못 버티면 되돌리기 문제라 잴 수 없음
+        if (!cntTrial(ref, refCompleted, pi, false, 0.0)) { g_cnt.unmeasured.push_back(T); ++g_cnt.cur; return; }
+        // 짝 옮기기: 누르고 있는 길이가 중요한 모드에서 다음 반대 입력도 같이 옮김 (누름은 다음 뗌, 뗌은 다음 누름)
+        //   하나만 옮기면 웨이브·비행기 경로가 계속 어긋나 한참 뒤에 죽는데, 실제로는 다음 클릭으로 맞추므로 짝으로도 재서 큰 쪽을 씀
+        int be = 0, bl = 0; bool bp = false; int dE = -1, dL = -1;
         for (int m = 0; m < 2; ++m) {
             bool pair = m == 1;
-            if (pair && (!isPress || !holdMode || !(pi + 1 < (int)g_cnt.ev.size() && !g_cnt.ev[pi + 1].second))) break;
+            if (pair && (!holdMode || !(pi + 1 < (int)g_cnt.ev.size() && g_cnt.ev[pi + 1].second != isPress))) break;
             int e = 0; while (e < Counter::MAXS && cntTrial(ref, refCompleted, pi, pair, -(e + 1))) ++e;
+            int de = g_cnt.lastDie >= 0 ? g_cnt.lastDie - T : -1;
             int l = 0; while (l < Counter::MAXS && cntTrial(ref, refCompleted, pi, pair, l + 1)) ++l;
-            if (m == 0 || e + l > be + bl) { be = e; bl = l; bp = pair; }
+            int dl = g_cnt.lastDie >= 0 ? g_cnt.lastDie - T : -1;
+            if (m == 0 || e + l > be + bl) { be = e; bl = l; bp = pair; dE = e < Counter::MAXS ? de : -1; dL = l < Counter::MAXS ? dl : -1; }
         }
         double bef = be, blf = bl;
         if (g_cnt.cbf) {                       // 경계 틱 안을 반씩 나눠 1/8000초까지: e 틱은 되고 e+1 틱은 안 됨 → 그 사이 33칸 중 되는 가장 먼 칸
@@ -1126,7 +1145,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
             };
             bef = refine(be, -1); blf = refine(bl, +1);
         }
-        g_cnt.res.push_back({T, be, bl, bp, isPress, bef, blf});
+        g_cnt.res.push_back({T, be, bl, bp, isPress, bef, blf, dE, dL});
         ++g_cnt.cur;
         cntSetLabel(fmt::format("FWC counting {}/{}", g_cnt.cur, g_cnt.ev.size()));
     }
@@ -1197,6 +1216,24 @@ class $modify(FwcPlayLayer, PlayLayer) {
         }
     }
 
+    // 자동 실행에서 스타트포스 고르기 (이클립스 스타트포스 바꾸기와 같은 방법: x 순서로 정렬해 n 번째)
+    void addObject(GameObject* object) {
+        PlayLayer::addObject(object);
+        if (g_autorun && g_autorunStartPos > 0 && object && object->m_objectID == 31) m_fields->m_startPos.push_back(static_cast<StartPosObject*>(object));
+    }
+    void createObjectsFromSetupFinished() {
+        PlayLayer::createObjectsFromSetupFinished();
+        auto& v = m_fields->m_startPos;
+        if (!g_autorun || g_autorunStartPos <= 0 || v.empty()) return;
+        std::sort(v.begin(), v.end(), [](GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); });
+        int i = std::min(g_autorunStartPos, (int)v.size()) - 1;
+        log::info("자동 실행: 스타트포스 {}/{} (x {:.1f}) 에서 시작", i + 1, v.size(), v[i]->getPositionX());
+        m_currentCheckpoint = nullptr;
+        this->setStartPosObject(v[i]);
+        m_isTestMode = true;
+        this->resetLevel();
+    }
+
     void onQuit() {
         if (g_mrec.on && !g_mrec.ev.empty()) { std::ofstream f(Mod::get()->getConfigDir() / "macro_rec_last.txt", std::ios::binary | std::ios::trunc); f << mrecText(); }
         g_mrec = MacroRec{};
@@ -1221,7 +1258,7 @@ class $modify(FwcGameLayer, GJBaseGameLayer) {
             // 메뉴에서 시작: 결과를 비우고 지금 시작 지점에서 다시 시작한 뒤 셈
             g_cnt.armed = false; g_cnt.on = true; g_cnt.done = false; g_cnt.failed = false; g_cnt.msg.clear();
             g_cnt.calib.clear(); g_cnt.repair.clear(); g_cnt.repairs = 0;
-            g_cnt.res.clear(); g_cnt.cur = 0; g_cnt.trials = 0; g_cnt.resets = 0; g_cnt.ticksRun = 0; g_cnt.msReset = 0; g_cnt.msStep = 0;
+            g_cnt.res.clear(); g_cnt.unmeasured.clear(); g_cnt.cur = 0; g_cnt.trials = 0; g_cnt.resets = 0; g_cnt.ticksRun = 0; g_cnt.msReset = 0; g_cnt.msStep = 0;
             static_cast<FwcPlayLayer*>(pl)->resetLevel();
             g_mac.lastTick = -1;
             return;
@@ -1471,12 +1508,14 @@ class $modify(FwcMenu, MenuLayer) {
         if (s_done) return true;
         s_done = true;
         std::string name;
-        { std::ifstream f(Mod::get()->getConfigDir() / "autorun.txt"); std::getline(f, name); }
+        {   std::ifstream f(Mod::get()->getConfigDir() / "autorun.txt"); std::getline(f, name);
+            std::string sp; if (std::getline(f, sp)) { try { g_autorunStartPos = std::max(0, std::stoi(sp)); } catch (...) { g_autorunStartPos = 0; } } }
         while (!name.empty() && (name.back() == '\r' || name.back() == '\n' || name.back() == ' ')) name.pop_back();
         if (name.empty()) return true;
-        auto arr = LocalLevelManager::get()->m_localLevels;
-        if (!arr) return true;
-        for (auto lvl : CCArrayExt<GJGameLevel*>(arr)) {
+        std::vector<GJGameLevel*> cands;            // 내 레벨 먼저, 없으면 저장된 온라인 레벨
+        if (auto arr = LocalLevelManager::get()->m_localLevels) for (auto lvl : CCArrayExt<GJGameLevel*>(arr)) cands.push_back(lvl);
+        if (auto dict = GameLevelManager::get()->m_onlineLevels) for (auto [key, lvl] : CCDictionaryExt<gd::string, GJGameLevel*>{dict}) cands.push_back(lvl);
+        for (auto lvl : cands) {
             if (lvl && std::string(lvl->m_levelName) == name) {
                 log::info("자동 실행: 레벨 '{}' 열기", name);
                 g_autorun = true;
