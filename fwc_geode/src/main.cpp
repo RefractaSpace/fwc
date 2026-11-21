@@ -382,7 +382,8 @@ struct Counter {
     bool refDied = false;                      // 이번 입력의 원래 경로(되돌린 상태에서 그대로 재생)가 중간에 죽나 = 매크로 끝
     static constexpr int REC_MAX = 12;         // 다음 입력을 다시 맞출 때 최대 몇 틱까지 옮겨 보나 (다다음 입력·옮긴 입력을 넘지는 않음)
     int lastDie = -1;                          // 마지막 시도가 죽은 틱 (-1: 안 죽음)
-    int recTrials = 0, recovered = 0;          // 다음 클릭으로 되살리기: 해 본 횟수, 통과한 횟수
+    int recTrials = 0, recovered = 0;
+    int freshCps = 0;                          // 처음부터 다시 돌려 저장 지점을 만든 횟수          // 다음 클릭으로 되살리기: 해 본 횟수, 통과한 횟수
     Inputs trial;    // 이번 시도에 쓰는 입력
     std::chrono::steady_clock::time_point t0;
     long long ticksRun = 0; int trials = 0, resets = 0;
@@ -1205,6 +1206,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         tb += "# calibration: " + g_cnt.calib + "chosen offset " + std::to_string(g_cnt.offset) + "\n";
         if (!g_cnt.merge.empty()) tb += "# merge: " + g_cnt.merge + "\n";
         tb += fmt::format("# restore check: {} ticks compared, position differs {}, rotation-only differs {}\n", g_cnt.chkTicks, g_cnt.chkPosDiff, g_cnt.chkRotDiff);
+        tb += fmt::format("# fresh checkpoints (restore drift): {}\n", g_cnt.freshCps);
         tb += "# rule: shift this click; it passes if, for at least one of the previous click's possible positions, the player is alive at the next click\n";
         if (!g_cnt.unmeasured.empty()) { tb += fmt::format("# unmeasured ({}, restored state differs from a fresh run):", g_cnt.unmeasured.size()); for (int t : g_cnt.unmeasured) tb += " " + std::to_string(t); tb += "\n"; }
         if (!g_cnt.repair.empty()) tb += "# repair (" + std::to_string(g_cnt.repairs) + " changes): " + g_cnt.repair + "\n";
@@ -1282,13 +1284,21 @@ class $modify(FwcPlayLayer, PlayLayer) {
         for (int j = pi - 1; j >= 0; --j) if (g_cnt.validShift.count(j)) { pj = j; break; }
         if (pj >= 0 && g_cnt.ev[pj].first < T - 240) pj = -1;        // 너무 먼 입력은 이전 클릭으로 안 씀
         // 저장 지점을 R 로 옮기기 (앞으로만)
-        auto moveCp = [&](int R) -> bool {
+        // fresh: 되돌리기 오차가 쌓였을 때 처음부터 다시 돌려 정확한 저장 지점을 만듦
+        auto moveCp = [&](int R, bool fresh = false) -> bool {
             if (R < 0) R = 6;
-            if (g_cnt.cp) cntRestore();
-            if (g_cnt.cp && R <= g_cnt.cpTick) return true;
+            if (!fresh) {
+                if (g_cnt.cp) cntRestore();
+                if (g_cnt.cp && R <= g_cnt.cpTick) return true;
+            }
             g_cnt.useTrial = false;
-            if (cntTick() > R) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: restore tick {} is in the past", T, R); cntFinish(); return false; }
-            if (!cntStepTo(R)) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: macro dies before tick {}", T, R); cntFinish(); return false; }
+            bool ok = !fresh && cntTick() <= R && cntStepTo(R);
+            if (!ok) {                                   // 되돌린 상태에서 가다 죽으면 처음부터 다시
+                cntDropCp();
+                cntFresh();
+                if (!cntStepTo(R)) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: macro dies before tick {}", T, R); cntFinish(); return false; }
+                ++g_cnt.freshCps;
+            }
             cntDropCp();
             cntMakeCp();
             return true;
@@ -1306,7 +1316,10 @@ class $modify(FwcPlayLayer, PlayLayer) {
             // 되돌린 상태가 원래와 달라 기준도 못 버팀 → 이전 클릭 없이, 이 클릭 바로 앞의 새 저장 지점에서 다시
             pj = -1; sList.assign(1, 0);
             if (!moveCp(cntRestoreTick(T))) return;
-            if (!cntTry(pi, pj, 0, 0.0, &mode)) { g_cnt.unmeasured.push_back(T); ++g_cnt.cur; return; }
+            if (!cntTry(pi, pj, 0, 0.0, &mode)) {
+                if (!moveCp(cntRestoreTick(T), true)) return;     // 처음부터 돌려 만든 정확한 저장 지점에서 한 번 더
+                if (!cntTry(pi, pj, 0, 0.0, &mode)) { g_cnt.unmeasured.push_back(T); ++g_cnt.cur; return; }
+            }
         }
         bool holdMode = (mode & (1 | 8 | 16 | 64)) != 0;      // 비행기(1)·웨이브(8)·로봇(16)·스윙(64): 누르는 길이가 중요한 모드
         if (!isPress && !holdMode) { ++g_cnt.cur; return; }     // 큐브·UFO·볼·거미에서 뗌은 타이밍이 의미 없어 세지 않음
