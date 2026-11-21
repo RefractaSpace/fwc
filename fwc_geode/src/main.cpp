@@ -1163,7 +1163,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
                 double wf = g_cnt.cbf ? r.earlyF + r.lateF + SUB_TICK : (double)(r.early + r.late + 1);
                 wsec.push_back(wf / 240.0); tsec.push_back(r.tick / 240.0);
                 size_t n = wsec.size();
-                auto et = [&](double L) {
+                auto et = [&](double L) -> double {
                     double prodP = 1.0, sumTerm = 0.0, r0 = 1.0;
                     for (size_t i = 0; i < n; ++i) {
                         double pp = std::clamp(std::erf(0.5 * wsec[i] * L / std::sqrt(2.0)), 1e-300, 1.0);
