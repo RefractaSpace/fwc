@@ -377,6 +377,7 @@ struct Counter {
     std::vector<int> unmeasured;               // 되돌린 상태가 원래와 달라서 잴 수 없었던 입력 (틱)
     bool refDied = false;                      // 이번 입력의 원래 경로(되돌린 상태에서 그대로 재생)가 중간에 죽나 = 매크로 끝
     int lastDie = -1;                          // 마지막 시도가 죽은 틱 (-1: 안 죽음)
+    int recTrials = 0, recovered = 0;          // 다음 클릭으로 되살리기: 해 본 횟수, 통과한 횟수
     Inputs trial;    // 이번 시도에 쓰는 입력
     std::chrono::steady_clock::time_point t0;
     long long ticksRun = 0; int trials = 0, resets = 0;
@@ -1027,6 +1028,42 @@ class $modify(FwcPlayLayer, PlayLayer) {
                 if (a.mode == r.mode && a.up == r.up && a.dual == r.dual && std::fabs(a.y - r.y) <= Counter::NEAR_Y && (!a.dual || std::fabs(a.y2 - r.y2) <= Counter::NEAR_Y)) break;
             }
         }
+        // 다음 클릭으로 되살리기: 다음 입력까지는 살았는데 그 뒤에 죽었으면, 다음 입력 하나만 ±1~6틱 다시 맞춰 봄.
+        //   그다음 입력까지 살거나 원래 경로로 돌아오면 통과 (그 입력 탓이 아닌, 뒤 입력이 고정돼서 생긴 죽음을 빼기)
+        if (!ok && g_cnt.lastDie >= 0 && afterIdx < (int)ev.size() && g_cnt.lastDie > ev[afterIdx].first) {
+            int dieKeep = g_cnt.lastDie;
+            const auto base = g_cnt.trial;
+            double na = tOf(afterIdx);
+            double lo = pair ? nrel : nt;                                  // 다음 입력은 옮긴 입력보다 뒤
+            double hi = afterIdx + 1 < (int)ev.size() ? tOf(afterIdx + 1) : 1e18;
+            int goal2 = afterIdx + 1 < (int)ev.size() ? ev[afterIdx + 1].first + 1 : end;
+            goal2 = std::min(goal2, end);
+            static const int rs[12] = {-1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6};
+            for (int r : rs) {
+                double nn = na + r;
+                if (nn <= lo || nn >= hi || nn < g_cnt.cpTick + 1.0) continue;
+                g_cnt.trial = base;
+                inputsRemove(g_cnt.trial, ev[afterIdx].first, ev[afterIdx].second, g_cnt.evFrac[afterIdx]);
+                inputsAdd(g_cnt.trial, nn, ev[afterIdx].second);
+                cntRestore();
+                g_cnt.useTrial = true; ++g_cnt.trials; ++g_cnt.recTrials;
+                int lc2 = std::max(lastChanged, (int)std::floor(nn));
+                bool ok2 = true;
+                while (cntTick() < goal2) {
+                    int before = cntTick();
+                    cntStep();
+                    if (g_cnt.dead) { ok2 = false; break; }
+                    if (g_cnt.completed) break;
+                    int t = cntTick();
+                    if (t == before) continue;
+                    int k = t - g_cnt.cpTick - 1;
+                    if (k >= 0 && k < (int)ref.size() && t > lc2 + 1 && cntSig() == ref[k]) break;
+                }
+                if (ok2) { ok = true; ++g_cnt.recovered; break; }
+            }
+            g_cnt.trial = base;
+            if (!ok) g_cnt.lastDie = dieKeep; else g_cnt.lastDie = -1;
+        }
         g_cnt.useTrial = false;
         return ok;
     }
@@ -1047,6 +1084,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         tb += "# calibration: " + g_cnt.calib + "chosen offset " + std::to_string(g_cnt.offset) + "\n";
         if (!g_cnt.merge.empty()) tb += "# merge: " + g_cnt.merge + "\n";
         tb += fmt::format("# restore check: {} ticks compared, position differs {}, rotation-only differs {}\n", g_cnt.chkTicks, g_cnt.chkPosDiff, g_cnt.chkRotDiff);
+        tb += fmt::format("# rule: a shift passes if it rejoins the original path, or survives to the next input and re-timing only that next input by up to 6 ticks survives to the input after it (recovery tries {}, recovered {})\n", g_cnt.recTrials, g_cnt.recovered);
         if (!g_cnt.unmeasured.empty()) { tb += fmt::format("# unmeasured ({}, restored state differs from a fresh run):", g_cnt.unmeasured.size()); for (int t : g_cnt.unmeasured) tb += " " + std::to_string(t); tb += "\n"; }
         if (!g_cnt.repair.empty()) tb += "# repair (" + std::to_string(g_cnt.repairs) + " changes): " + g_cnt.repair + "\n";
         for (size_t i = 0; i < g_cnt.res.size(); ++i) {
