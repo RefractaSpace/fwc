@@ -473,7 +473,8 @@ static void fwcActionsAuto(bool on) {
     else d->getScheduler()->pauseTarget(d->getActionManager());
 }
 static bool g_autorun = false;
-static int g_autorunStartPos = 0;           // autorun.txt 둘째 줄: 시작할 스타트포스 번호 (1 = x 가 가장 작은 것, 0 = 레벨 처음)
+static int g_autorunStartPos = 0;
+static StartPosObject* g_pendingStartPos = nullptr;   // 자동 실행: 첫 프레임에 바꿀 스타트포스           // autorun.txt 둘째 줄: 시작할 스타트포스 번호 (1 = x 가 가장 작은 것, 0 = 레벨 처음)
 // 지금 이 게임 창이 맨 앞(입력 받는 창)인가
 static bool fwcFocused() {
     HWND fg = GetForegroundWindow(); DWORD pid = 0;
@@ -1404,14 +1405,23 @@ class $modify(FwcPlayLayer, PlayLayer) {
         if (!g_autorun || g_autorunStartPos <= 0 || v.empty()) return;
         std::sort(v.begin(), v.end(), [](GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); });
         int i = std::min(g_autorunStartPos, (int)v.size()) - 1;
-        log::info("자동 실행: 스타트포스 {}/{} (x {:.1f}) 에서 시작", i + 1, v.size(), v[i]->getPositionX());
+        if (m_startPosObject == v[i]) { log::info("자동 실행: 스타트포스 {}/{} 이미 선택됨", i + 1, v.size()); return; }
+        // 레벨을 만드는 도중에 다시 시작하면 멈추므로, 첫 프레임에서 바꿈
+        log::info("자동 실행: 스타트포스 {}/{} (x {:.1f}) 로 바꿀 예정", i + 1, v.size(), v[i]->getPositionX());
+        g_pendingStartPos = v[i];
+    }
+    void fwcApplyPendingStartPos() {
+        auto sp = g_pendingStartPos; g_pendingStartPos = nullptr;
+        if (!sp) return;
         m_currentCheckpoint = nullptr;
-        this->setStartPosObject(v[i]);
+        this->setStartPosObject(sp);
         m_isTestMode = true;
         this->resetLevel();
+        g_mac.lastTick = -1;
     }
 
     void onQuit() {
+        g_pendingStartPos = nullptr;
         if (g_mrec.on && !g_mrec.ev.empty()) { std::ofstream f(Mod::get()->getConfigDir() / "macro_rec_last.txt", std::ios::binary | std::ios::trunc); f << mrecText(); }
         g_mrec = MacroRec{};
         cbfModPause(false);
@@ -1424,6 +1434,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
 class $modify(FwcGameLayer, GJBaseGameLayer) {
     void update(float dt) {
         auto pl = PlayLayer::get();
+        if (pl && static_cast<GJBaseGameLayer*>(pl) == this && g_pendingStartPos && !g_cnt.internal) { static_cast<FwcPlayLayer*>(pl)->fwcApplyPendingStartPos(); return; }
         if (pl && static_cast<GJBaseGameLayer*>(pl) == this && !g_cnt.internal && !g_cnt.busy && m_player1) {
             if (g_rec.active) { static_cast<FwcPlayLayer*>(pl)->recWork(); return; }                       // 녹화 중: 게임을 직접 진행
             if (g_rec.want && !g_cnt.armed && (!g_cnt.on || g_cnt.done) && !m_player1->m_isDead && fwcTick(m_gameState.m_currentProgress) >= 8) {
