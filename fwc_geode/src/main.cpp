@@ -1745,9 +1745,21 @@ class $modify(FwcMenu, MenuLayer) {
         if (auto arr = LocalLevelManager::get()->m_localLevels) for (auto lvl : CCArrayExt<GJGameLevel*>(arr)) cands.push_back(lvl);
         if (auto dict = GameLevelManager::get()->m_onlineLevels) for (auto [key, lvl] : CCDictionaryExt<gd::string, GJGameLevel*>{dict}) cands.push_back(lvl);
         {   // 같은 이름이 여러 개면 가장 긴 것(레벨 데이터가 가장 큰 것) 하나만
-            GJGameLevel* best = nullptr; size_t bestLen = 0;
-            for (auto lvl : cands) if (lvl && std::string(lvl->m_levelName) == name && (!best || lvl->m_levelString.size() > bestLen)) { best = lvl; bestLen = lvl->m_levelString.size(); }
-            cands.clear(); if (best) { cands.push_back(best); log::info("자동 실행: 같은 이름 중 가장 긴 레벨 (데이터 {}글자)", bestLen); }
+            // 길이 = 오브젝트 x 의 최댓값 (레벨 데이터를 풀어서 셈)
+            auto lenOf = [](GJGameLevel* lvl) {
+                std::string d = cocos2d::ZipUtils::decompressString(lvl->m_levelString, false, 0);
+                double mx = 0; size_t pos = 0;
+                while ((pos = d.find(";1,", pos)) != std::string::npos) {
+                    size_t end = d.find(';', pos + 1); if (end == std::string::npos) end = d.size();
+                    size_t k = d.find(",2,", pos + 1);
+                    if (k != std::string::npos && k < end) mx = std::max(mx, std::strtod(d.c_str() + k + 3, nullptr));
+                    pos = end;
+                }
+                return mx;
+            };
+            GJGameLevel* best = nullptr; double bestLen = -1;
+            for (auto lvl : cands) if (lvl && std::string(lvl->m_levelName) == name) { double L = lenOf(lvl); log::info("자동 실행: '{}' 후보 길이 x {:.1f}", name, L); if (L > bestLen) { best = lvl; bestLen = L; } }
+            cands.clear(); if (best) { cands.push_back(best); log::info("자동 실행: 같은 이름 중 가장 긴 레벨 (x {:.1f})", bestLen); }
         }
         for (auto lvl : cands) {
             if (lvl && std::string(lvl->m_levelName) == name) {
