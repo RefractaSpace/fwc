@@ -1034,7 +1034,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         for (auto const& kv : g_mac.inputs) for (In const& x : kv.second) { int t = kv.first; float f = x.frac; mix(&t, sizeof t); mix(&x.down, sizeof x.down); mix(&f, sizeof f); }
         float spx = m_startPosObject ? m_startPosObject->getPositionX() : -1.f; mix(&spx, sizeof spx);
         bool cbf = g_cnt.cbf; mix(&cbf, sizeof cbf);
-        const int RULE = 6;  mix(&RULE, sizeof RULE);           // 판정 방식이 바뀌면 이 숫자를 올림 → 다시 셈
+        const int RULE = 7;  mix(&RULE, sizeof RULE);           // 판정 방식이 바뀌면 이 숫자를 올림 → 다시 셈
         return fmt::format("{:016x}", h);
     }
     std::filesystem::path cntSigPath() {
@@ -1280,18 +1280,20 @@ class $modify(FwcPlayLayer, PlayLayer) {
         // 이전 클릭: 앞에서 이미 잰 가장 가까운 입력. 그 입력이 될 수 있었던 위치들(경우의 수)을 저장해 두고 씀
         int pj = -1;
         for (int j = pi - 1; j >= 0; --j) if (g_cnt.validShift.count(j)) { pj = j; break; }
-        int Tbase = pj >= 0 ? std::min(T, g_cnt.ev[pj].first) : T;
-        int R = cntRestoreTick(Tbase);
-        if (R < 0) R = 6;
-        // 저장 지점을 R 로 옮기기
-        if (g_cnt.cp) cntRestore();
-        if (!g_cnt.cp || R > g_cnt.cpTick) {
+        if (pj >= 0 && g_cnt.ev[pj].first < T - 240) pj = -1;        // 너무 먼 입력은 이전 클릭으로 안 씀
+        // 저장 지점을 R 로 옮기기 (앞으로만)
+        auto moveCp = [&](int R) -> bool {
+            if (R < 0) R = 6;
+            if (g_cnt.cp) cntRestore();
+            if (g_cnt.cp && R <= g_cnt.cpTick) return true;
             g_cnt.useTrial = false;
-            if (cntTick() > R) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: restore tick {} is in the past", T, R); cntFinish(); return; }
-            if (!cntStepTo(R)) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: macro dies before tick {}", T, R); cntFinish(); return; }
+            if (cntTick() > R) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: restore tick {} is in the past", T, R); cntFinish(); return false; }
+            if (!cntStepTo(R)) { g_cnt.failed = true; g_cnt.msg = fmt::format("press {}: macro dies before tick {}", T, R); cntFinish(); return false; }
             cntDropCp();
             cntMakeCp();
-        }
+            return true;
+        };
+        if (!moveCp(cntRestoreTick(pj >= 0 ? std::min(T, g_cnt.ev[pj].first) : T))) return;
         // 이전 클릭의 경우의 수: 0, +1, -1, +2, -2 ... (가까운 것부터)
         std::vector<int> sList{0};
         if (pj >= 0) {
@@ -1300,7 +1302,12 @@ class $modify(FwcPlayLayer, PlayLayer) {
         }
         // 기준: 아무것도 안 옮기고 다음 클릭까지 → 못 버티면 되돌리기 문제라 잴 수 없음
         int mode = 0;
-        if (!cntTry(pi, pj, 0, 0.0, &mode)) { g_cnt.unmeasured.push_back(T); ++g_cnt.cur; return; }
+        if (!cntTry(pi, pj, 0, 0.0, &mode)) {
+            // 되돌린 상태가 원래와 달라 기준도 못 버팀 → 이전 클릭 없이, 이 클릭 바로 앞의 새 저장 지점에서 다시
+            pj = -1; sList.assign(1, 0);
+            if (!moveCp(cntRestoreTick(T))) return;
+            if (!cntTry(pi, pj, 0, 0.0, &mode)) { g_cnt.unmeasured.push_back(T); ++g_cnt.cur; return; }
+        }
         bool holdMode = (mode & (1 | 8 | 16 | 64)) != 0;      // 비행기(1)·웨이브(8)·로봇(16)·스윙(64): 누르는 길이가 중요한 모드
         if (!isPress && !holdMode) { ++g_cnt.cur; return; }     // 큐브·UFO·볼·거미에서 뗌은 타이밍이 의미 없어 세지 않음
         // 이 클릭을 d 만큼 옮겨서, 이전 클릭의 경우의 수 중 하나라도 다음 클릭까지 살면 통과
