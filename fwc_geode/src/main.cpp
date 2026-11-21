@@ -842,6 +842,19 @@ class $modify(FwcPlayLayer, PlayLayer) {
             g_rec.info += fmt::format("song: adding failed (ffmpeg exit {}), video has no sound\n", (int)code);
         }
     }
+    // 녹화마다 따로 남기기: 설정 폴더 recordings/<레벨 이름>_<날짜_시각>.mp4 (showcase.mp4 는 항상 마지막 것)
+    void recKeepCopy() {
+        auto dir = Mod::get()->getConfigDir();
+        std::error_code ec;
+        std::filesystem::create_directories(dir / "recordings", ec);
+        std::string safe = g_cnt.levelName;
+        for (auto& ch : safe) if (std::string_view("\\/:*?\"<>|").find(ch) != std::string_view::npos) ch = '_';
+        auto now = std::time(nullptr); std::tm tm{}; localtime_s(&tm, &now);
+        char ts[32]; std::strftime(ts, sizeof ts, "%Y%m%d_%H%M%S", &tm);
+        auto dst = dir / "recordings" / (safe + "_" + ts + ".mp4");
+        std::filesystem::copy_file(dir / "showcase.mp4", dst, std::filesystem::copy_options::overwrite_existing, ec);
+        g_rec.info += ec ? std::string("copy: failed\n") : fmt::format("copy: {}\n", dst.string());
+    }
     void recIntro() {
         if (!Mod::get()->getSettingValue<bool>("record-intro")) return;
         Ref<CCNode> intro = makeIntro();
@@ -865,6 +878,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
             fwcActionsAuto(true);
             recClose();
             recAddSong();
+            recKeepCopy();
             g_rec.info += fmt::format("seconds taken: {:.1f}\nfinal frames: {}\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - g_rec.t0).count(), g_rec.frames);
             std::ofstream f(Mod::get()->getConfigDir() / "record_info.txt", std::ios::binary | std::ios::trunc); f << g_rec.info;
             g_rec.done = true;
