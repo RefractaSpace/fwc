@@ -8,6 +8,7 @@
 #include <Geode/modify/GJBaseGameLayer.hpp>
 #include <Geode/modify/FMODAudioEngine.hpp>
 #include <Geode/modify/PauseLayer.hpp>
+#include <Geode/ui/GeodeUI.hpp>
 #include <Geode/modify/MenuLayer.hpp>
 #include <Geode/modify/AppDelegate.hpp>
 #include <Geode/modify/CCScheduler.hpp>
@@ -1660,6 +1661,14 @@ class $modify(FwcPause, PauseLayer) {
         lbl->setScale(0.45f);
         lbl->setPosition({ws.width - 62.f, 22.f});
         this->addChild(lbl, 100);
+        // FWC 설정 창 (지오드 메뉴까지 가지 않고). 바꾼 설정은 FWC 토글을 다시 누르거나 레벨을 다시 열면 적용
+        {
+            auto gs = ButtonSprite::create("FWC Settings");
+            gs->setScale(0.55f);
+            auto gb = CCMenuItemSpriteExtra::create(gs, this, menu_selector(FwcPause::onFwcSettings));
+            gb->setPosition({ws.width - 62.f, 50.f});
+            menu->addChild(gb);
+        }
         if (en && !g_cnt.ev.empty()) {                       // 매크로를 재생 중일 때만: 지금 시작 지점에서 윈도우 세기
             auto spr = ButtonSprite::create("FWC Count");
             spr->setScale(0.7f);
@@ -1668,6 +1677,7 @@ class $modify(FwcPause, PauseLayer) {
             menu->addChild(btn);
         }
     }
+    void onFwcSettings(CCObject*) { geode::openSettingsPopup(Mod::get(), false); }
     void onFwcToggle(CCObject* sender) {
         bool en = !Mod::get()->getSettingValue<bool>("enabled");          // 토글러는 누른 뒤에 상태가 바뀌므로 설정 값을 기준으로 뒤집음
         Mod::get()->setSettingValue<bool>("enabled", en);
