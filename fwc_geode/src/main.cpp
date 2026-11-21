@@ -1405,7 +1405,6 @@ class $modify(FwcPlayLayer, PlayLayer) {
         if (!g_autorun || g_autorunStartPos <= 0 || v.empty()) return;
         std::sort(v.begin(), v.end(), [](GameObject* a, GameObject* b) { return a->getPositionX() < b->getPositionX(); });
         int i = std::min(g_autorunStartPos, (int)v.size()) - 1;
-        if (m_startPosObject == v[i]) { log::info("자동 실행: 스타트포스 {}/{} 이미 선택됨", i + 1, v.size()); return; }
         // 레벨을 만드는 도중에 다시 시작하면 멈추므로, 첫 프레임에서 바꿈
         log::info("자동 실행: 스타트포스 {}/{} (x {:.1f}) 로 바꿀 예정", i + 1, v.size(), v[i]->getPositionX());
         g_pendingStartPos = v[i];
@@ -1416,8 +1415,11 @@ class $modify(FwcPlayLayer, PlayLayer) {
         m_currentCheckpoint = nullptr;
         this->setStartPosObject(sp);
         m_isTestMode = true;
+        if (m_isPracticeMode) this->resetLevelFromStart();
         this->resetLevel();
+        this->startMusic();
         g_mac.lastTick = -1;
+        log::info("자동 실행: 스타트포스 적용 (x {:.1f})", sp->getPositionX());
     }
 
     void onQuit() {
