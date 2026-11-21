@@ -534,22 +534,32 @@ class $modify(FwcPlayLayer, PlayLayer) {
 
     bool init(GJGameLevel* level, bool useReplay, bool dontCreateObjects) {
         if (!PlayLayer::init(level, useReplay, dontCreateObjects)) return false;
-        g_data = loadFor(std::string(level->m_levelName));
-        if (!Mod::get()->getSettingValue<bool>("enabled")) g_data.reset();      // 설정에서 끄면 표시·집계 안 함
+        fwcSetup();
+        return true;
+    }
+    // FWC 준비: 레벨을 열 때, 그리고 일시정지 메뉴에서 FWC 를 켜고 끌 때
+    //   enabled 가 꺼져 있으면 FWC 전체(표시·매크로 재생·세기·녹화)를 쓰지 않음
+    void fwcSetup() {
+        bool en = Mod::get()->getSettingValue<bool>("enabled");
+        if (m_fields->m_hud) { m_fields->m_hud->removeFromParent(); m_fields->m_hud = nullptr; }
+        clearRings();
+        g_data = en ? loadFor(std::string(m_level->m_levelName)) : std::nullopt;
         macroLoad();
+        if (!en) g_mac.on = false;
         clickLoad();
         g_showRings = Mod::get()->getSettingValue<bool>("show-rings");
         g_rec = Recorder{};
         g_rec.want = g_mac.on && Mod::get()->getSettingValue<bool>("record-video");
         g_cnt = Counter{};
         g_cnt.on = g_mac.on && Mod::get()->getSettingValue<bool>("count-windows");      // 설정이 켜져 있으면 레벨을 열자마자 셈
-        g_cnt.levelName = std::string(level->m_levelName);
+        g_cnt.levelName = std::string(m_level->m_levelName);
         g_cnt.cbf = Mod::get()->getSettingValue<bool>("count-cbf");
         g_mrec = MacroRec{}; g_live.clear(); g_sub.clear(); g_carry.clear();
-        g_mrec.on = !g_mac.on && Mod::get()->getSettingValue<bool>("macro-record");
+        g_mrec.on = en && !g_mac.on && Mod::get()->getSettingValue<bool>("macro-record");
         {   auto m = Mod::get()->getSettingValue<std::string>("record-cbf");
             g_mrec.mode = m == "fwc" ? 1 : (m == "cbf-mod" ? 2 : 0); }
         if (g_mac.on || (g_mrec.on && g_mrec.mode == 1)) { cbfModPause(true); m_clickBetweenSteps = false; m_clickOnSteps = false; }
+        else cbfModPause(false);
         if (g_mac.on) {                                 // 입력 목록 만들기 (나중에 메뉴에서 시작할 수도 있으므로 항상)
             cntBuildEv();
             if (g_cnt.pressIdx.empty()) { g_cnt.on = false; g_cnt.ev.clear(); g_cnt.evFrac.clear(); }
@@ -562,7 +572,6 @@ class $modify(FwcPlayLayer, PlayLayer) {
             m_fields->m_hud = hud;
             hud->refresh(0.f);
         }
-        return true;
     }
 
     // ───────── 게임 안 윈도우 세기 ─────────
@@ -1493,15 +1502,38 @@ class $modify(FwcAudio, FMODAudioEngine) {
 class $modify(FwcPause, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
-        if (g_cnt.ev.empty() || g_cnt.busy) return;          // 매크로 재생이 꺼져 있거나 이미 세는 중이면 버튼 없음
-        auto spr = ButtonSprite::create("FWC Count");
-        spr->setScale(0.7f);
-        auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(FwcPause::onFwcCount));
-        auto menu = CCMenu::create();
-        menu->addChild(btn);
+        if (g_cnt.busy) return;
         auto ws = CCDirector::get()->getWinSize();
-        menu->setPosition({ws.width / 2.f, 22.f});
+        auto menu = CCMenu::create();
+        menu->setPosition({0.f, 0.f});
         this->addChild(menu, 100);
+        // FWC 켜기/끄기 (설정의 enabled 와 같음). 누르면 바로 적용되고 지금 시작 지점에서 다시 시작
+        bool en = Mod::get()->getSettingValue<bool>("enabled");
+        auto tog = CCMenuItemToggler::createWithStandardSprites(this, menu_selector(FwcPause::onFwcToggle), 0.7f);
+        tog->toggle(en);
+        tog->setPosition({ws.width - 30.f, 22.f});
+        menu->addChild(tog);
+        auto lbl = CCLabelBMFont::create("FWC", "bigFont.fnt");
+        lbl->setScale(0.45f);
+        lbl->setPosition({ws.width - 62.f, 22.f});
+        this->addChild(lbl, 100);
+        if (en && !g_cnt.ev.empty()) {                       // 매크로를 재생 중일 때만: 지금 시작 지점에서 윈도우 세기
+            auto spr = ButtonSprite::create("FWC Count");
+            spr->setScale(0.7f);
+            auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(FwcPause::onFwcCount));
+            btn->setPosition({ws.width / 2.f, 22.f});
+            menu->addChild(btn);
+        }
+    }
+    void onFwcToggle(CCObject* sender) {
+        bool en = !Mod::get()->getSettingValue<bool>("enabled");          // 토글러는 누른 뒤에 상태가 바뀌므로 설정 값을 기준으로 뒤집음
+        Mod::get()->setSettingValue<bool>("enabled", en);
+        if (auto pl = static_cast<FwcPlayLayer*>(PlayLayer::get())) {
+            pl->fwcSetup();
+            pl->resetLevel();
+            g_mac.lastTick = -1;
+        }
+        this->onResume(sender);
     }
     void onFwcCount(CCObject* sender) {
         g_cnt.armed = true;
