@@ -364,6 +364,8 @@ struct Counter {
     static constexpr int HORIZON = 720;  // 옮긴 뒤 이만큼(3초) 더 살아 있으면 무조건 통과
     static constexpr int REJOIN_MIN = 120, REJOIN_MAX = 360, NEAR_Y = 15;   // 그 전이라도 "다다음 입력+30틱"(120~360틱 사이)에 살아서 원래 경로 근처(15 이내)면 통과 — 기존 계산기 판정과 같은 기준
     bool on = false, busy = false, internal = false, done = false, failed = false;
+    bool forced = false;                       // 메뉴에서 직접 시작: 이미 센 결과가 있어도 다시 셈
+    std::string sig;                            // 이번 세기의 조건 지문 (레벨·매크로·시작 지점·CBF·판정 방식)
     bool armed = false;                        // 일시정지 메뉴의 "FWC Count" 를 누름 → 지금 시작 지점에서 다시 시작해 세기
     bool dead = false, completed = false, useTrial = false;
     std::vector<std::pair<int, bool>> ev;      // (틱, 누름?) 순서대로
@@ -1000,7 +1002,35 @@ class $modify(FwcPlayLayer, PlayLayer) {
         g_cnt.calibOk = true;
         cntFresh();
     }
+    // 이번 세기 조건의 지문: 레벨 데이터, 매크로 입력(틱 안 위치 포함), 시작 지점, CBF 세기, 판정 방식 버전
+    std::string cntSignature() {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&](void const* p, size_t n) { auto b = static_cast<unsigned char const*>(p); for (size_t i = 0; i < n; ++i) { h ^= b[i]; h *= 1099511628211ull; } };
+        std::string ls = m_level ? std::string(m_level->m_levelString) : std::string();
+        mix(ls.data(), ls.size());
+        for (auto const& kv : g_mac.inputs) for (In const& x : kv.second) { int t = kv.first; float f = x.frac; mix(&t, sizeof t); mix(&x.down, sizeof x.down); mix(&f, sizeof f); }
+        float spx = m_startPosObject ? m_startPosObject->getPositionX() : -1.f; mix(&spx, sizeof spx);
+        bool cbf = g_cnt.cbf; mix(&cbf, sizeof cbf);
+        const int RULE = 4;  mix(&RULE, sizeof RULE);           // 판정 방식이 바뀌면 이 숫자를 올림 → 다시 셈
+        return fmt::format("{:016x}", h);
+    }
+    std::filesystem::path cntSigPath() {
+        std::string safe = g_cnt.levelName;
+        for (auto& ch : safe) if (std::string_view("\\/:*?\"<>|").find(ch) != std::string_view::npos) ch = '_';
+        return levelsDir() / (safe + ".sig");
+    }
     void cntStart() {
+        g_cnt.sig = cntSignature();
+        if (!g_cnt.forced) {                 // 같은 조건으로 이미 셌으면 다시 세지 않고 결과만 보여 줌
+            std::string old; { std::ifstream f(cntSigPath()); std::getline(f, old); }
+            if (!old.empty() && old == g_cnt.sig && loadFor(g_cnt.levelName)) {
+                g_cnt.done = true;
+                log::info("윈도우 세기: 같은 조건으로 이미 셈 ({}) → 건너뜀", g_cnt.sig);
+                cntSetLabel("FWC: already counted");
+                return;
+            }
+        }
+        g_cnt.forced = false;
         g_cnt.busy = true; g_cnt.t0 = std::chrono::steady_clock::now();
         fwcActionsAuto(false);
         cntMerge();
@@ -1141,6 +1171,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         js += "  ]\n}\n";
         { std::ofstream f(levelsDir() / (safe + ".json"), std::ios::binary | std::ios::trunc); f << js; }
         { std::ofstream f(Mod::get()->getConfigDir() / "windows_ingame.txt", std::ios::binary | std::ios::trunc); f << tb; }
+        if (!g_cnt.failed && !g_cnt.sig.empty()) { std::ofstream f(cntSigPath(), std::ios::binary | std::ios::trunc); f << g_cnt.sig << "\n"; }   // 다 셌을 때만: 다음에 같은 조건이면 건너뜀
         log::info("윈도우 세기 끝: 누름 {}개, {:.1f}초, 시도 {}번", g_cnt.res.size(), sec, g_cnt.trials);
         cntSetLabel(g_cnt.failed ? "FWC counting stopped (error)" : fmt::format("FWC done: {} inputs, {:.0f}s", g_cnt.res.size(), sec));
         // 결과를 바로 화면에 쓰기
@@ -1354,7 +1385,7 @@ class $modify(FwcGameLayer, GJBaseGameLayer) {
         }
         if (pl && static_cast<GJBaseGameLayer*>(pl) == this && g_cnt.armed && !g_cnt.busy && !g_cnt.internal && !g_cnt.ev.empty()) {
             // 메뉴에서 시작: 결과를 비우고 지금 시작 지점에서 다시 시작한 뒤 셈
-            g_cnt.armed = false; g_cnt.on = true; g_cnt.done = false; g_cnt.failed = false; g_cnt.msg.clear();
+            g_cnt.armed = false; g_cnt.forced = true; g_cnt.on = true; g_cnt.done = false; g_cnt.failed = false; g_cnt.msg.clear();
             g_cnt.calib.clear(); g_cnt.repair.clear(); g_cnt.repairs = 0;
             g_cnt.res.clear(); g_cnt.unmeasured.clear(); g_cnt.cur = 0; g_cnt.trials = 0; g_cnt.resets = 0; g_cnt.ticksRun = 0; g_cnt.msReset = 0; g_cnt.msStep = 0;
             static_cast<FwcPlayLayer*>(pl)->resetLevel();
