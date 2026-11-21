@@ -1155,6 +1155,16 @@ class $modify(FwcPlayLayer, PlayLayer) {
         if (fwcBlockPause()) return;
         PlayLayer::pauseGame(unfocused);
     }
+    // 세는 중에 끝에 닿으면 끝 연출(플레이어·카메라를 끌고 가는 액션)을 시작하지 않고 '클리어'로만 기록.
+    //   세기는 틱마다 액션도 같이 돌리므로, 연출이 시작되면 다시 시작한 뒤에도 남아서 플레이어를 끌고 가 엉뚱한 곳에서 죽음
+    void playEndAnimationToPos(CCPoint pos) {
+        if (g_cnt.busy) { g_cnt.completed = true; return; }
+        PlayLayer::playEndAnimationToPos(pos);
+    }
+    void playPlatformerEndAnimationToPos(CCPoint pos, bool instant) {
+        if (g_cnt.busy) { g_cnt.completed = true; return; }
+        PlayLayer::playPlatformerEndAnimationToPos(pos, instant);
+    }
     void levelComplete() {
         if (g_cnt.busy) { g_cnt.completed = true; return; }      // 세는 중에는 클리어 화면을 띄우지 않음
         if (g_mrec.on && !g_mrec.ev.empty()) {                   // 녹화한 매크로 저장
