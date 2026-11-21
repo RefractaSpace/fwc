@@ -1643,6 +1643,7 @@ class $modify(FwcAudio, FMODAudioEngine) {
 };
 
 // 일시정지 메뉴에 "FWC Count" 버튼: 지금 고른 시작 지점(스타트포스)에서 윈도우 세기를 시작
+static bool s_settingsOpened = false;
 class $modify(FwcPause, PauseLayer) {
     void customSetup() {
         PauseLayer::customSetup();
@@ -1677,7 +1678,13 @@ class $modify(FwcPause, PauseLayer) {
             menu->addChild(btn);
         }
     }
-    void onFwcSettings(CCObject*) { geode::openSettingsPopup(Mod::get(), false); }
+    void onFwcSettings(CCObject*) { s_settingsOpened = true; geode::openSettingsPopup(Mod::get(), false); }
+    // 설정 창을 열었었으면, 계속하기를 누를 때 바뀐 설정을 적용하고 지금 시작 지점에서 다시 시작
+    void onResume(CCObject* sender) {
+        bool apply = s_settingsOpened; s_settingsOpened = false;
+        PauseLayer::onResume(sender);
+        if (apply) if (auto pl = static_cast<FwcPlayLayer*>(PlayLayer::get())) { pl->fwcSetup(); pl->resetLevel(); g_mac.lastTick = -1; }
+    }
     void onFwcToggle(CCObject* sender) {
         bool en = !Mod::get()->getSettingValue<bool>("enabled");          // 토글러는 누른 뒤에 상태가 바뀌므로 설정 값을 기준으로 뒤집음
         Mod::get()->setSettingValue<bool>("enabled", en);
