@@ -449,10 +449,12 @@ static void cntBuildEv() {
 // ── 영상 녹화 ──
 //   매크로를 화면 없이 돌릴 때와 같은 방식(틱마다 애니메이션 → 물리)으로 게임을 직접 진행시키면서,
 //   영상 한 프레임(60fps = 4틱)마다 화면을 별도 버퍼에 그려 ffmpeg 로 넘긴다. 실제 시간과 무관하게 정확히 60fps 로 찍힌다.
-//   ffmpeg 위치는 설정 폴더 ffmpeg_path.txt, 결과는 설정 폴더 showcase.mp4 (소리 없음, 정보는 record_info.txt)
+//   ffmpeg 위치는 설정 폴더 ffmpeg_path.txt, 결과는 설정 폴더 showcase.mp4 (끝나고 레벨 노래를 입힘, 정보는 record_info.txt)
 struct Recorder {
     bool want = false, active = false, done = false;
-    int w = 1280, h = 720, fps = 60;
+    int w = 1920, h = 1080, fps = 60;          // 1080p 60fps
+    double introSec = 0, songStart = 0;        // 노래 입히기: 소개 화면 길이, 녹화 시작 때 노래 위치(초)
+    std::string ffmpeg, song;
     GLuint fbo = 0, tex = 0;
     std::vector<unsigned char> buf;
     HANDLE hWrite = nullptr; HANDLE hProc = nullptr;
@@ -482,7 +484,7 @@ static bool recOpen(std::string const& ffmpeg, std::string const& out) {
     HANDLE hRead = nullptr, hWrite = nullptr;
     if (!CreatePipe(&hRead, &hWrite, &sa, 1 << 24)) return false;
     SetHandleInformation(hWrite, HANDLE_FLAG_INHERIT, 0);
-    std::string cmd = fmt::format("\"{}\" -y -f rawvideo -pix_fmt rgba -s {}x{} -r {} -i - -vf vflip -c:v libx264 -preset veryfast -crf 18 -pix_fmt yuv420p \"{}\"",
+    std::string cmd = fmt::format("\"{}\" -y -f rawvideo -pix_fmt rgba -s {}x{} -r {} -i - -vf vflip -c:v libx264 -preset veryfast -crf 15 -pix_fmt yuv420p \"{}\"",
                                   ffmpeg, g_rec.w, g_rec.h, g_rec.fps, out);
     STARTUPINFOA si{}; si.cb = sizeof(si); si.dwFlags = STARTF_USESTDHANDLES; si.hStdInput = hRead;
     si.hStdOutput = nullptr; si.hStdError = nullptr;
@@ -712,6 +714,17 @@ class $modify(FwcPlayLayer, PlayLayer) {
         fwcActionsAuto(false);
         float songOffset = m_levelSettings ? m_levelSettings->m_songOffset : 0.f;
         g_rec.info.clear();
+        g_rec.ffmpeg = ffmpeg;
+        g_rec.songStart = m_gameState.m_levelTime + songOffset;
+        g_rec.song.clear();
+        if (m_level) {                       // 지금 레벨 노래 파일 (NONG 를 쓰면 바뀐 파일)
+            std::string sp = m_level->getAudioFileName();
+            if (!sp.empty()) {
+                std::string full = CCFileUtils::sharedFileUtils()->fullPathForFilename(sp.c_str(), false);
+                std::error_code ec2;
+                if (std::filesystem::exists(full, ec2)) g_rec.song = full; else if (std::filesystem::exists(sp, ec2)) g_rec.song = sp;
+            }
+        }
         recIntro();                          // 소개 화면 3초 (설정에서 끌 수 있음). 노래를 입힐 때 이만큼 늦춰야 함 → record_info.txt 에 적음
         g_rec.info += fmt::format("output: {}\nsize: {}x{} fps {}\nsong id: {}\nsong offset: {}\nstart tick: {}\nstart leveltime: {:.6f}\n", out, g_rec.w, g_rec.h, g_rec.fps,
                                  m_level ? (int)m_level->m_songID : 0, songOffset, cntTick(), m_gameState.m_levelTime);
@@ -795,12 +808,38 @@ class $modify(FwcPlayLayer, PlayLayer) {
         }
         return root;
     }
+    // 노래 입히기: 화면만 있는 영상에 레벨 노래를 (녹화 시작 때 노래 위치부터, 소개 화면 길이만큼 늦춰) 붙임
+    void recAddSong() {
+        auto dir = Mod::get()->getConfigDir();
+        if (g_rec.song.empty()) { g_rec.info += "song: not found (video has no sound)\n"; return; }
+        std::error_code ec;
+        auto vid = dir / "showcase.mp4", tmp = dir / "showcase_video_only.mp4";
+        std::filesystem::rename(vid, tmp, ec);
+        if (ec) { g_rec.info += "song: cannot rename video\n"; return; }
+        int delayMs = (int)std::lround(g_rec.introSec * 1000.0);
+        std::string cmd = fmt::format("\"{}\" -y -i \"{}\" -ss {:.3f} -i \"{}\" -map 0:v -map 1:a -c:v copy -c:a aac -b:a 192k -af adelay={}:all=1 -shortest \"{}\"",
+                                      g_rec.ffmpeg, tmp.string(), std::max(0.0, g_rec.songStart), g_rec.song, delayMs, vid.string());
+        STARTUPINFOA si{}; si.cb = sizeof(si);
+        PROCESS_INFORMATION pi{};
+        std::vector<char> cl(cmd.begin(), cmd.end()); cl.push_back(0);
+        bool ok = CreateProcessA(nullptr, cl.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
+        DWORD code = 1;
+        if (ok) { WaitForSingleObject(pi.hProcess, 120000); GetExitCodeProcess(pi.hProcess, &code); CloseHandle(pi.hProcess); CloseHandle(pi.hThread); }
+        if (ok && code == 0 && std::filesystem::exists(vid, ec)) {
+            std::filesystem::remove(tmp, ec);
+            g_rec.info += fmt::format("song: {} from {:.3f}s, delayed {} ms\n", g_rec.song, g_rec.songStart, delayMs);
+        } else {
+            std::filesystem::remove(vid, ec); std::filesystem::rename(tmp, vid, ec);          // 실패하면 소리 없는 영상 그대로
+            g_rec.info += fmt::format("song: adding failed (ffmpeg exit {}), video has no sound\n", (int)code);
+        }
+    }
     void recIntro() {
         if (!Mod::get()->getSettingValue<bool>("record-intro")) return;
         Ref<CCNode> intro = makeIntro();
         recCapture(intro);
         const int n = g_rec.fps * 3;                         // 3초 (같은 그림을 그대로 반복)
         for (int i = 0; i < n && g_rec.active; ++i) recWrite();
+        g_rec.introSec = n / (double)g_rec.fps;
         g_rec.info += fmt::format("intro seconds: {:.3f} (frames {})\n", n / (double)g_rec.fps, n);
     }
     void recWork() {                        // 실제 한 프레임마다 영상 프레임 몇 개씩
@@ -816,6 +855,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         if (!g_rec.active) {
             fwcActionsAuto(true);
             recClose();
+            recAddSong();
             g_rec.info += fmt::format("seconds taken: {:.1f}\nfinal frames: {}\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - g_rec.t0).count(), g_rec.frames);
             std::ofstream f(Mod::get()->getConfigDir() / "record_info.txt", std::ios::binary | std::ios::trunc); f << g_rec.info;
             g_rec.done = true;
