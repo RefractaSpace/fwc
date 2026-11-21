@@ -1744,6 +1744,11 @@ class $modify(FwcMenu, MenuLayer) {
         std::vector<GJGameLevel*> cands;            // 내 레벨 먼저, 없으면 저장된 온라인 레벨
         if (auto arr = LocalLevelManager::get()->m_localLevels) for (auto lvl : CCArrayExt<GJGameLevel*>(arr)) cands.push_back(lvl);
         if (auto dict = GameLevelManager::get()->m_onlineLevels) for (auto [key, lvl] : CCDictionaryExt<gd::string, GJGameLevel*>{dict}) cands.push_back(lvl);
+        {   // 같은 이름이 여러 개면 가장 긴 것(레벨 데이터가 가장 큰 것) 하나만
+            GJGameLevel* best = nullptr; size_t bestLen = 0;
+            for (auto lvl : cands) if (lvl && std::string(lvl->m_levelName) == name && (!best || lvl->m_levelString.size() > bestLen)) { best = lvl; bestLen = lvl->m_levelString.size(); }
+            cands.clear(); if (best) { cands.push_back(best); log::info("자동 실행: 같은 이름 중 가장 긴 레벨 (데이터 {}글자)", bestLen); }
+        }
         for (auto lvl : cands) {
             if (lvl && std::string(lvl->m_levelName) == name) {
                 log::info("자동 실행: 레벨 '{}' 열기", name);
