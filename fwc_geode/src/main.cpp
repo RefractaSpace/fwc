@@ -737,7 +737,13 @@ class $modify(FwcPlayLayer, PlayLayer) {
         glBindFramebuffer(GL_FRAMEBUFFER, g_rec.fbo);
         glViewport(0, 0, g_rec.w, g_rec.h);
         glClearColor(0, 0, 0, 1); glClear(GL_COLOR_BUFFER_BIT);
+        // 영상에는 게임 화면 + FWC 표시만: 버튼층(일시정지 버튼, 다른 모드의 글자·스타트포스 바꾸기 등)과 FWC 상태 글자는 숨김
+        bool uiVis = m_uiLayer && m_uiLayer->isVisible(), lbVis = g_cnt.label && g_cnt.label->isVisible();
+        if (m_uiLayer) m_uiLayer->setVisible(false);
+        if (g_cnt.label) g_cnt.label->setVisible(false);
         node->visit();
+        if (m_uiLayer) m_uiLayer->setVisible(uiVis);
+        if (g_cnt.label) g_cnt.label->setVisible(lbVis);
         glPixelStorei(GL_PACK_ALIGNMENT, 1);
         glReadPixels(0, 0, g_rec.w, g_rec.h, GL_RGBA, GL_UNSIGNED_BYTE, g_rec.buf.data());
         glBindFramebuffer(GL_FRAMEBUFFER, oldFbo);
@@ -1011,7 +1017,7 @@ class $modify(FwcPlayLayer, PlayLayer) {
         for (auto const& kv : g_mac.inputs) for (In const& x : kv.second) { int t = kv.first; float f = x.frac; mix(&t, sizeof t); mix(&x.down, sizeof x.down); mix(&f, sizeof f); }
         float spx = m_startPosObject ? m_startPosObject->getPositionX() : -1.f; mix(&spx, sizeof spx);
         bool cbf = g_cnt.cbf; mix(&cbf, sizeof cbf);
-        const int RULE = 4;  mix(&RULE, sizeof RULE);           // 판정 방식이 바뀌면 이 숫자를 올림 → 다시 셈
+        const int RULE = 5;  mix(&RULE, sizeof RULE);           // 판정 방식이 바뀌면 이 숫자를 올림 → 다시 셈
         return fmt::format("{:016x}", h);
     }
     std::filesystem::path cntSigPath() {
@@ -1149,7 +1155,34 @@ class $modify(FwcPlayLayer, PlayLayer) {
         std::string safe = g_cnt.levelName;
         for (auto& ch : safe) if (std::string_view("\\/:*?\"<>|").find(ch) != std::string_view::npos) ch = '_';
         std::error_code ec; std::filesystem::create_directories(levelsDir(), ec);
-        std::string js = "{\n  \"source\": \"geode\", \"level_end\": 0, \"cbf\": " + std::string(g_cnt.cbf ? "true" : "false") + ", \"n\": " + std::to_string(g_cnt.res.size()) + ",\n  \"windows\": [\n";
+        // σ/s (NaNDL 식, 앱 analyze.precision 과 같음): 입력 k 개까지의 윈도우로 24시간 안에 깰 수 있는 정밀도
+        std::vector<double> run;
+        {
+            std::vector<double> wsec, tsec;
+            for (auto const& r : g_cnt.res) {
+                double wf = g_cnt.cbf ? r.earlyF + r.lateF + SUB_TICK : (double)(r.early + r.late + 1);
+                wsec.push_back(wf / 240.0); tsec.push_back(r.tick / 240.0);
+                size_t n = wsec.size();
+                auto et = [&](double L) {
+                    double prodP = 1.0, sumTerm = 0.0, r0 = 1.0;
+                    for (size_t i = 0; i < n; ++i) {
+                        double pp = std::clamp(std::erf(0.5 * wsec[i] * L / std::sqrt(2.0)), 1e-300, 1.0);
+                        sumTerm += tsec[i] * r0 * (1.0 - pp);
+                        r0 *= pp; prodP *= pp;
+                    }
+                    if (prodP <= 0) return INFINITY;
+                    double v = (tsec[n - 1] * prodP + sumTerm + 1.0) / prodP;
+                    return std::isfinite(v) ? v : INFINITY;
+                };
+                double lo = 1e-3, hi = 1e5, target = 86400.0;
+                if (et(lo) <= target) { run.push_back(lo); continue; }
+                for (int it = 0; it < 200; ++it) { double mid = std::sqrt(lo * hi); if (et(mid) > target) lo = mid; else hi = mid; if (hi / lo < 1 + 1e-10) break; }
+                run.push_back(std::sqrt(lo * hi));
+            }
+        }
+        std::string js = "{\n  \"source\": \"geode\", \"level_end\": " + fmt::format("{:.3f}", (double)m_levelLength) + ", \"cbf\": " + std::string(g_cnt.cbf ? "true" : "false") + ", \"n\": " + std::to_string(g_cnt.res.size()) + ",\n  \"precision_run\": [";
+        for (size_t i = 0; i < run.size(); ++i) js += (i ? ", " : "") + fmt::format("{:.4f}", run[i]);
+        js += "],\n  \"windows\": [\n";
         std::string tb = fmt::format("# 게임 안 윈도우 세기: 누름 {}개, {:.1f}초, 시도 {}번, 되돌리기 {}번({:.1f}초), 진행 {}틱({:.1f}초){}\n# tick early late window pair kind dieE dieL (dieE/dieL: 처음 실패한 시도가 입력 뒤 몇 틱에 죽었나, -1 = 죽음 아님/끝까지 됨)\n",
                                      g_cnt.res.size(), sec, g_cnt.trials, g_cnt.resets, g_cnt.msReset / 1000.0, g_cnt.ticksRun, g_cnt.msStep / 1000.0, g_cnt.msg.empty() ? "" : " (" + g_cnt.msg + ")");
         tb += "# calibration: " + g_cnt.calib + "chosen offset " + std::to_string(g_cnt.offset) + "\n";
